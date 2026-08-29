@@ -6,27 +6,30 @@ const SYMBOL = z.string().describe("Symbole de l'actif, ex: BTC, ETH, SOL");
 const INTERVAL = z
   .string()
   .optional()
-  .describe("Intervalle des bougies : 1m, 5m, 15m, 1h, 4h, 1d... (defaut 1h)");
+  .describe(
+    "Intervalle : 1m, 3m, 5m, 15m, 30m, 1h, 4h, 6h, 8h, 12h, 1d, 1w (defaut 1h). Sur le plan Hobbyist, certains endpoints exigent >=4h."
+  );
 const LIMIT = z
   .number()
   .int()
   .min(1)
-  .max(500)
+  .max(1000)
   .optional()
-  .describe("Nombre de points a retourner (defaut 50, max 500)");
+  .describe("Nombre de points a retourner (defaut 50, max 1000)");
 const EXCHANGE = z
   .string()
   .optional()
-  .describe("Filtrer sur un exchange precis, ex: Binance, MEXC");
+  .describe("Exchange unique, ex: Binance, MEXC (defaut Binance)");
+const EXCHANGE_LIST = z
+  .string()
+  .optional()
+  .describe(
+    "Liste d'exchanges separes par virgule, ex: Binance,MEXC (defaut Binance,MEXC)"
+  );
 
 function textResult(data: unknown) {
   return {
-    content: [
-      {
-        type: "text" as const,
-        text: JSON.stringify(data, null, 2),
-      },
-    ],
+    content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
   };
 }
 
@@ -45,25 +48,15 @@ function errorResult(err: unknown) {
 
 const handler = createMcpHandler(
   (server) => {
-    // --- Open Interest ---
     server.tool(
       "get_open_interest_history",
-      "Historique de l'open interest (OI) agrege pour un actif, en OHLC sur l'intervalle demande. Utile pour evaluer la force d'une tendance et le crowding de capital.",
-      {
-        symbol: SYMBOL,
-        interval: INTERVAL,
-        limit: LIMIT,
-        exchange: EXCHANGE,
-      },
+      "Historique de l'open interest (OI) en OHLC pour une paire sur un exchange donne. Utile pour evaluer la force d'une tendance et le crowding de capital.",
+      { symbol: SYMBOL, interval: INTERVAL, limit: LIMIT, exchange: EXCHANGE },
       async ({ symbol, interval, limit, exchange }) => {
         try {
-          const data = await CoinglassAPI.openInterestOhlc({
-            symbol,
-            interval: interval ?? "1h",
-            limit: limit ?? 50,
-            exchange,
-          });
-          return textResult(data);
+          return textResult(
+            await CoinglassAPI.openInterestHistory({ symbol, interval, limit, exchange })
+          );
         } catch (err) {
           return errorResult(err);
         }
@@ -72,37 +65,26 @@ const handler = createMcpHandler(
 
     server.tool(
       "get_open_interest_by_exchange",
-      "Open interest actuel d'un actif, ventile par exchange (Binance, MEXC, OKX, Bybit...). Utile pour voir ou le capital est concentre.",
+      "Open interest actuel d'un coin, ventile par exchange (Binance, MEXC, OKX, Bybit, CME...), avec variation % sur 5m/15m/30m/1h/4h/24h. Utile pour voir ou le capital est concentre et sa dynamique recente.",
       { symbol: SYMBOL },
       async ({ symbol }) => {
         try {
-          const data = await CoinglassAPI.openInterestByExchange({ symbol });
-          return textResult(data);
+          return textResult(await CoinglassAPI.openInterestByExchange({ symbol }));
         } catch (err) {
           return errorResult(err);
         }
       }
     );
 
-    // --- Funding Rate ---
     server.tool(
       "get_funding_rate_history",
-      "Historique du funding rate (OHLC) pour un actif. Utile pour mesurer le cout de portage long/short et le sentiment du marche.",
-      {
-        symbol: SYMBOL,
-        interval: INTERVAL,
-        limit: LIMIT,
-        exchange: EXCHANGE,
-      },
+      "Historique du funding rate (OHLC) pour une paire sur un exchange donne. Utile pour mesurer le cout de portage long/short et le sentiment du marche.",
+      { symbol: SYMBOL, interval: INTERVAL, limit: LIMIT, exchange: EXCHANGE },
       async ({ symbol, interval, limit, exchange }) => {
         try {
-          const data = await CoinglassAPI.fundingRateOhlc({
-            symbol,
-            interval: interval ?? "1h",
-            limit: limit ?? 50,
-            exchange,
-          });
-          return textResult(data);
+          return textResult(
+            await CoinglassAPI.fundingRateHistory({ symbol, interval, limit, exchange })
+          );
         } catch (err) {
           return errorResult(err);
         }
@@ -111,11 +93,16 @@ const handler = createMcpHandler(
 
     server.tool(
       "get_funding_rate_by_exchange",
-      "Funding rate actuel d'un actif, ventile par exchange (Binance, MEXC...). Utile pour comparer le sentiment entre plateformes.",
-      { symbol: SYMBOL },
+      "Funding rate actuel de tous les symboles, ventile par exchange (mode stablecoin-margin et coin-margin). Passe un symbole pour filtrer le resultat sur un seul actif.",
+      { symbol: SYMBOL.optional().describe("Filtre optionnel, ex: BTC") },
       async ({ symbol }) => {
         try {
-          const data = await CoinglassAPI.fundingRateByExchange({ symbol });
+          const data = await CoinglassAPI.fundingRateByExchange();
+          if (symbol) {
+            const target = symbol.toUpperCase();
+            const filtered = data.data?.filter((d) => d.symbol === target);
+            return textResult(filtered);
+          }
           return textResult(data);
         } catch (err) {
           return errorResult(err);
@@ -123,71 +110,39 @@ const handler = createMcpHandler(
       }
     );
 
-    // --- CVD (via taker buy/sell volume) ---
     server.tool(
       "get_cvd",
-      "Delta de volume cumule (CVD) approxime a partir du volume taker buy/sell. Renvoie la serie brute CoinGlass et, si le format le permet, un CVD calcule (delta cumule buy-sell).",
+      "Delta de volume cumule (CVD) pour un coin, agrege sur les exchanges donnes (Binance+MEXC par defaut). Calcule a partir du volume taker buy/sell agrege (disponible sur le plan Hobbyist). Note : l'endpoint CVD natif CoinGlass existe mais demande le plan Startup ou superieur.",
       {
         symbol: SYMBOL,
         interval: INTERVAL,
         limit: LIMIT,
-        exchange: EXCHANGE,
+        exchangeList: EXCHANGE_LIST,
       },
-      async ({ symbol, interval, limit, exchange }) => {
+      async ({ symbol, interval, limit, exchangeList }) => {
         try {
-          const data: any = await CoinglassAPI.takerBuySellVolume({
+          const raw = await CoinglassAPI.aggregatedTakerBuySellVolume({
             symbol,
-            interval: interval ?? "1h",
-            limit: limit ?? 50,
-            exchange,
+            interval,
+            limit,
+            exchangeList,
           });
-
-          // Best-effort : on tente de normaliser la serie pour calculer un CVD.
-          // Les noms de champs exacts sont a verifier dans docs.coinglass.com une fois la cle active.
-          let cvd: unknown = null;
-          const list: any[] = Array.isArray(data)
-            ? data
-            : Array.isArray(data?.data)
-            ? data.data
-            : [];
-
-          const normalized = list
-            .map((p) => {
-              const time = p.time ?? p.t ?? p.timestamp;
-              const buyVol =
-                p.buyVol ?? p.buy_vol ?? p.takerBuyVolume ?? p.buyVolUsd;
-              const sellVol =
-                p.sellVol ?? p.sell_vol ?? p.takerSellVolume ?? p.sellVolUsd;
-              if (
-                time !== undefined &&
-                buyVol !== undefined &&
-                sellVol !== undefined
-              ) {
-                return { time, buyVol: Number(buyVol), sellVol: Number(sellVol) };
-              }
-              return null;
-            })
-            .filter(Boolean) as Array<{
-            time: number;
-            buyVol: number;
-            sellVol: number;
-          }>;
-
-          if (normalized.length > 0) {
-            cvd = computeCvdSeries(normalized);
-          }
-
-          return textResult({ raw: data, cvd });
+          const series = (raw.data ?? []).map((d) => ({
+            time: d.time,
+            buyVol: Number(d.aggregated_buy_volume_usd),
+            sellVol: Number(d.aggregated_sell_volume_usd),
+          }));
+          const cvd = computeCvdSeries(series);
+          return textResult({ cvd });
         } catch (err) {
           return errorResult(err);
         }
       }
     );
 
-    // --- Long/Short ratio ---
     server.tool(
       "get_long_short_ratio",
-      "Ratio long/short pour un actif : soit le ratio global des comptes, soit celui des top traders. Utile pour le sentiment de marche et les signaux de retournement.",
+      "Ratio long/short pour une paire : comptes globaux ou top traders. Utile pour le sentiment de marche et les signaux de retournement.",
       {
         symbol: SYMBOL,
         type: z
@@ -200,16 +155,10 @@ const handler = createMcpHandler(
       },
       async ({ symbol, type, interval, limit, exchange }) => {
         try {
-          const params = {
-            symbol,
-            interval: interval ?? "1h",
-            limit: limit ?? 50,
-            exchange,
-          };
           const data =
             type === "top_trader"
-              ? await CoinglassAPI.topTraderLongShortRatio(params)
-              : await CoinglassAPI.globalLongShortRatio(params);
+              ? await CoinglassAPI.topTraderLongShortRatio({ symbol, interval, limit, exchange })
+              : await CoinglassAPI.globalLongShortRatio({ symbol, interval, limit, exchange });
           return textResult(data);
         } catch (err) {
           return errorResult(err);
@@ -217,30 +166,23 @@ const handler = createMcpHandler(
       }
     );
 
-    // --- Liquidations ---
     server.tool(
       "get_liquidations",
-      "Historique des liquidations pour un actif (par defaut agrege tous exchanges). Utile pour detecter les zones de liquidation forcee et les niveaux de support/resistance.",
+      "Historique des liquidations d'un coin, agrege sur les exchanges donnes (Binance+MEXC par defaut). Utile pour detecter les zones de liquidation forcee et les niveaux de support/resistance.",
       {
         symbol: SYMBOL,
         interval: INTERVAL,
         limit: LIMIT,
-        exchange: EXCHANGE,
+        exchangeList: EXCHANGE_LIST,
       },
-      async ({ symbol, interval, limit, exchange }) => {
+      async ({ symbol, interval, limit, exchangeList }) => {
         try {
-          const data = exchange
-            ? await CoinglassAPI.liquidationHistory({
-                symbol,
-                interval: interval ?? "1h",
-                limit: limit ?? 50,
-                exchange,
-              })
-            : await CoinglassAPI.liquidationAggregated({
-                symbol,
-                interval: interval ?? "1h",
-                limit: limit ?? 50,
-              });
+          const data = await CoinglassAPI.liquidationAggregated({
+            symbol,
+            interval,
+            limit,
+            exchangeList,
+          });
           return textResult(data);
         } catch (err) {
           return errorResult(err);

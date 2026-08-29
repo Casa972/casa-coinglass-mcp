@@ -1,5 +1,5 @@
-// Petit client pour l'API CoinGlass V4.
-// Doc officielle : https://docs.coinglass.com/reference/getting-started-with-your-api
+// Client pour l'API CoinGlass V4 - chemins verifies contre la doc officielle
+// https://github.com/coinglass-official/coinglass-api-docs
 
 const BASE_URL = "https://open-api-v4.coinglass.com";
 
@@ -23,9 +23,20 @@ function apiKey(): string {
   return key;
 }
 
-// Appel generique GET vers un endpoint CoinGlass V4.
-// `params` : objet de query params optionnels (symbol, interval, limit, exchange, etc.)
-export async function coinglassGet<T = unknown>(
+// "BTC" -> "BTCUSDT" pour les endpoints qui attendent une paire de trading.
+// Si l'utilisateur donne deja une paire (se termine par USDT/USD/USDC), on ne touche pas.
+export function toPair(symbol: string): string {
+  const s = symbol.toUpperCase().trim();
+  if (/(USDT|USDC|USD)$/.test(s)) return s;
+  return `${s}USDT`;
+}
+
+// "BTCUSDT" -> "BTC" pour les endpoints qui attendent le coin brut (pas une paire).
+export function toCoin(symbol: string): string {
+  return symbol.toUpperCase().trim().replace(/(USDT|USDC|USD)$/, "");
+}
+
+async function coinglassGet<T = unknown>(
   path: string,
   params: Record<string, string | number | undefined> = {}
 ): Promise<T> {
@@ -41,15 +52,14 @@ export async function coinglassGet<T = unknown>(
       "CG-API-KEY": apiKey(),
       Accept: "application/json",
     },
-    // les donnees derivees changent vite, on ne met jamais en cache
     cache: "no-store",
   });
 
   const json = await res.json().catch(() => null);
 
-  if (!res.ok) {
+  if (!res.ok || (json && typeof json === "object" && "code" in json && json.code !== "0")) {
     throw new CoinglassError(
-      `CoinGlass API ${res.status} sur ${path}`,
+      `CoinGlass API erreur sur ${path}`,
       res.status,
       json
     );
@@ -58,77 +68,115 @@ export async function coinglassGet<T = unknown>(
   return json as T;
 }
 
-// --- Wrappers par famille de donnees, alignes sur le framework de Luc :
-// CVD (taker buy/sell -> delta), OI, et funding rate, en confluence multi-timeframe.
+// Defaults adaptes a l'usage de Luc : MEXC + Binance, day trading.
+const DEFAULT_EXCHANGE = "Binance";
+const DEFAULT_EXCHANGE_LIST = "Binance,MEXC";
 
 export const CoinglassAPI = {
-  // Open Interest
-  openInterestOhlc: (params: {
-    symbol: string;
-    interval?: string; // ex: "1h", "4h", "1d"
-    limit?: number;
-    exchange?: string;
-  }) => coinglassGet("/api/futures/openInterest/ohlc-history", params),
-
-  openInterestByExchange: (params: { symbol: string }) =>
-    coinglassGet("/api/futures/openInterest/exchange-list", params),
-
-  // Funding Rate
-  fundingRateOhlc: (params: {
-    symbol: string;
-    interval?: string;
-    limit?: number;
-    exchange?: string;
-  }) => coinglassGet("/api/futures/fundingRate/ohlc-history", params),
-
-  fundingRateByExchange: (params: { symbol: string }) =>
-    coinglassGet("/api/futures/fundingRate/exchange-list", params),
-
-  // Taker buy/sell volume -> base du CVD (delta cumule)
-  takerBuySellVolume: (params: {
-    symbol: string;
-    interval?: string;
-    limit?: number;
-    exchange?: string;
-  }) => coinglassGet("/api/futures/taker-buy-sell-volume/history", params),
-
-  // Long/Short ratios
-  globalLongShortRatio: (params: {
+  // --- Open Interest ---
+  openInterestHistory: (p: {
     symbol: string;
     interval?: string;
     limit?: number;
     exchange?: string;
   }) =>
-    coinglassGet(
-      "/api/futures/global-long-short-account-ratio/history",
-      params
+    coinglassGet("/api/futures/open-interest/history", {
+      exchange: p.exchange ?? DEFAULT_EXCHANGE,
+      symbol: toPair(p.symbol),
+      interval: p.interval ?? "1h",
+      limit: p.limit ?? 50,
+    }),
+
+  openInterestByExchange: (p: { symbol: string }) =>
+    coinglassGet("/api/futures/open-interest/exchange-list", {
+      symbol: toCoin(p.symbol),
+    }),
+
+  // --- Funding Rate ---
+  fundingRateHistory: (p: {
+    symbol: string;
+    interval?: string;
+    limit?: number;
+    exchange?: string;
+  }) =>
+    coinglassGet("/api/futures/funding-rate/history", {
+      exchange: p.exchange ?? DEFAULT_EXCHANGE,
+      symbol: toPair(p.symbol),
+      interval: p.interval ?? "1h",
+      limit: p.limit ?? 50,
+    }),
+
+  // Pas de parametres sur cet endpoint : renvoie tous les symboles.
+  fundingRateByExchange: () =>
+    coinglassGet<{ data: Array<{ symbol: string; [k: string]: unknown }> }>(
+      "/api/futures/funding-rate/exchange-list"
     ),
 
-  topTraderLongShortRatio: (params: {
+  // --- CVD (calcule a partir du volume taker buy/sell agrege, dispo des Hobbyist) ---
+  // Note : l'endpoint natif /api/futures/aggregated-cvd/history existe mais demande
+  // le plan Startup ou +. Sur Hobbyist, on calcule le delta nous-memes.
+  aggregatedTakerBuySellVolume: (p: {
+    symbol: string;
+    interval?: string;
+    limit?: number;
+    exchangeList?: string;
+  }) =>
+    coinglassGet<{
+      data: Array<{
+        time: number;
+        aggregated_buy_volume_usd: number;
+        aggregated_sell_volume_usd: number;
+      }>;
+    }>("/api/futures/aggregated-taker-buy-sell-volume/history", {
+      exchange_list: p.exchangeList ?? DEFAULT_EXCHANGE_LIST,
+      symbol: toCoin(p.symbol),
+      interval: p.interval ?? "1h",
+      limit: p.limit ?? 50,
+    }),
+
+  // --- Long/Short ratio ---
+  globalLongShortRatio: (p: {
     symbol: string;
     interval?: string;
     limit?: number;
     exchange?: string;
   }) =>
-    coinglassGet("/api/futures/top-long-short-account-ratio/history", params),
+    coinglassGet("/api/futures/global-long-short-account-ratio/history", {
+      exchange: p.exchange ?? DEFAULT_EXCHANGE,
+      symbol: toPair(p.symbol),
+      interval: p.interval ?? "1h",
+      limit: p.limit ?? 50,
+    }),
 
-  // Liquidations
-  liquidationHistory: (params: {
+  topTraderLongShortRatio: (p: {
     symbol: string;
     interval?: string;
     limit?: number;
     exchange?: string;
-  }) => coinglassGet("/api/futures/liquidation/history", params),
+  }) =>
+    coinglassGet("/api/futures/top-long-short-account-ratio/history", {
+      exchange: p.exchange ?? DEFAULT_EXCHANGE,
+      symbol: toPair(p.symbol),
+      interval: p.interval ?? "1h",
+      limit: p.limit ?? 50,
+    }),
 
-  liquidationAggregated: (params: {
+  // --- Liquidations (agrege Binance+MEXC par defaut) ---
+  liquidationAggregated: (p: {
     symbol: string;
     interval?: string;
     limit?: number;
-  }) => coinglassGet("/api/futures/liquidation/aggregated-history", params),
+    exchangeList?: string;
+  }) =>
+    coinglassGet("/api/futures/liquidation/aggregated-history", {
+      exchange_list: p.exchangeList ?? DEFAULT_EXCHANGE_LIST,
+      symbol: toCoin(p.symbol),
+      interval: p.interval ?? "1h",
+      limit: p.limit ?? 50,
+    }),
 };
 
-// Calcule un CVD (cumulative volume delta) a partir d'une serie taker buy/sell volume.
-// CoinGlass renvoie du volume buy/sell par bougie ; le CVD est la somme cumulee de (buy - sell).
+// Delta cumule (CVD) a partir d'une serie buy/sell volume.
 export function computeCvdSeries(
   series: Array<{ time: number; buyVol: number; sellVol: number }>
 ) {
