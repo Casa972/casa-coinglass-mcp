@@ -1,0 +1,24 @@
+{
+  "name": "casa-coinglass-mcp",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Serveur MCP perso qui expose les donnees CoinGlass (OI, funding, CVD, liquidations, long/short) a Claude.",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.20.0",
+    "mcp-handler": "^1.1.0",
+    "next": "^15.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "@types/node": "^20.14.0",
+    "@types/react": "^19.0.0"
+  }
+}
