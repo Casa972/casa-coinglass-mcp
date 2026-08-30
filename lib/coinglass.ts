@@ -384,3 +384,121 @@ export async function buildSqueezeScan(
 
   return results.sort((a, b) => Number(b.qualifies) - Number(a.qualifies));
 }
+
+// Scan surchauffe (setup short) : miroir inverse du squeeze scan.
+// Cible les coins ou les longs sont surrepresentes et commencent a se faire
+// liquider : funding tres positif + OI qui monte (longs s'accumulent) + CVD
+// net vendeur (distribution) + liquidations dominees par les longs.
+export type HeatScanRow = FundingScreenerRow & {
+  oiChangePercent4h: number | null;
+  oiChangePercent1h: number | null;
+  cvdRecentTrendPositive: boolean | null;
+  cvdLastDeltaUsd: number | null;
+  shortLiqUsd: number;
+  longLiqUsd: number;
+  longShortLiqRatio: number | null;
+  predictedFundingRateRaw: number | null;
+  predictedFundingPositive: boolean | null;
+  qualifies: boolean;
+  error?: string;
+};
+
+export async function buildHeatScan(
+  candidates: FundingScreenerRow[],
+  opts: { minOiChangePct?: number; minLiqRatio?: number; liqLookbackPeriods?: number } = {}
+): Promise<HeatScanRow[]> {
+  const minOiChangePct = opts.minOiChangePct ?? 5;
+  const minLiqRatio = opts.minLiqRatio ?? 2;
+  const lookback = opts.liqLookbackPeriods ?? 6;
+  const DELAY_MS = 2500;
+
+  const results: HeatScanRow[] = [];
+  for (let i = 0; i < candidates.length; i++) {
+    if (i > 0) await new Promise((r) => setTimeout(r, DELAY_MS));
+    const c = candidates[i];
+    results.push(await (async (): Promise<HeatScanRow> => {
+      try {
+        const [oiRaw, cvdRaw, liqRaw, predictedRaw] = await Promise.all([
+          CoinglassAPI.openInterestByExchange({ symbol: c.symbol }) as Promise<{
+            data?: Array<{ exchange: string; open_interest_change_percent_4h?: number; open_interest_change_percent_1h?: number }>;
+          }>,
+          CoinglassAPI.aggregatedTakerBuySellVolume({ symbol: c.symbol, interval: "4h", limit: lookback }),
+          CoinglassAPI.liquidationAggregated({ symbol: c.symbol, interval: "4h", limit: lookback }) as Promise<{
+            data?: Array<{ aggregated_long_liquidation_usd?: number; aggregated_short_liquidation_usd?: number }>;
+          }>,
+          CoinalyzeAPI.predictedFundingRateCurrent({ symbol: c.symbol, exchange: c.exchange })
+            .catch(() => null) as Promise<Array<{ value?: number }> | null>,
+        ]);
+
+        const oiAll = oiRaw.data?.find((d) => d.exchange === "All");
+        const oiChangePercent4h = oiAll?.open_interest_change_percent_4h ?? null;
+        const oiChangePercent1h = oiAll?.open_interest_change_percent_1h ?? null;
+
+        const cvdSeries = computeCvdSeries(
+          (cvdRaw.data ?? []).map((d) => ({
+            time: d.time,
+            buyVol: Number(d.aggregated_buy_volume_usd),
+            sellVol: Number(d.aggregated_sell_volume_usd),
+          }))
+        );
+        const lastTwo = cvdSeries.slice(-2);
+        const cvdLastDeltaUsd = cvdSeries.length ? cvdSeries[cvdSeries.length - 1].delta : null;
+        const cvdRecentTrendPositive =
+          lastTwo.length > 0 ? lastTwo.reduce((s, p) => s + p.delta, 0) > 0 : null;
+
+        const liqData = liqRaw.data ?? [];
+        const shortLiqUsd = liqData.reduce((s, d) => s + Number(d.aggregated_short_liquidation_usd ?? 0), 0);
+        const longLiqUsd = liqData.reduce((s, d) => s + Number(d.aggregated_long_liquidation_usd ?? 0), 0);
+        // Ratio inverse : longs liquidés / shorts liquidés
+        const longShortLiqRatio = shortLiqUsd > 0 ? longLiqUsd / shortLiqUsd : longLiqUsd > 0 ? null : null;
+
+        const predictedFundingRateRaw =
+          Array.isArray(predictedRaw) && predictedRaw.length > 0
+            ? (predictedRaw[0].value ?? null)
+            : null;
+        const predictedFundingPositive =
+          predictedFundingRateRaw !== null ? predictedFundingRateRaw > 0 : null;
+
+        const qualifies =
+          oiChangePercent4h !== null &&
+          oiChangePercent4h >= minOiChangePct &&
+          cvdRecentTrendPositive === false &&
+          ((longShortLiqRatio !== null && longShortLiqRatio >= minLiqRatio) ||
+            (shortLiqUsd === 0 && longLiqUsd > 0)) &&
+          // Predicted funding toujours positif = longs continuent de payer, pression maintenue
+          predictedFundingPositive !== false;
+
+        return {
+          ...c,
+          oiChangePercent4h,
+          oiChangePercent1h,
+          cvdRecentTrendPositive,
+          cvdLastDeltaUsd,
+          shortLiqUsd,
+          longLiqUsd,
+          longShortLiqRatio,
+          predictedFundingRateRaw,
+          predictedFundingPositive,
+          qualifies,
+        };
+      } catch (err) {
+        return {
+          ...c,
+          oiChangePercent4h: null,
+          oiChangePercent1h: null,
+          cvdRecentTrendPositive: null,
+          cvdLastDeltaUsd: null,
+          shortLiqUsd: 0,
+          longLiqUsd: 0,
+          longShortLiqRatio: null,
+          predictedFundingRateRaw: null,
+          predictedFundingPositive: null,
+          qualifies: false,
+          error: err instanceof Error ? err.message : "erreur inconnue",
+        };
+      }
+    })());
+  }
+
+  return results.sort((a, b) => Number(b.qualifies) - Number(a.qualifies));
+}

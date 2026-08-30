@@ -1,6 +1,6 @@
 import { createMcpHandler } from "mcp-handler";
 import { z } from "zod";
-import { CoinglassAPI, computeCvdSeries, buildFundingScreener, buildSqueezeScan, CoinglassError } from "@/lib/coinglass";
+import { CoinglassAPI, computeCvdSeries, buildFundingScreener, buildSqueezeScan, buildHeatScan, CoinglassError } from "@/lib/coinglass";
 import { CoinalyzeAPI, CoinalyzeError } from "@/lib/coinalyze";
 import { BinanceAPI, BinanceError } from "@/lib/binance";
 import { MexcAPI, MexcError } from "@/lib/mexc";
@@ -409,6 +409,48 @@ const handler = createMcpHandler(
       async ({ symbol }) => {
         try {
           return textResult(await MexcAPI.fundingRate({ symbol }));
+        } catch (err) {
+          return errorResult(err);
+        }
+      }
+    );
+
+    server.tool(
+      "get_heat_scan",
+      "Scan surchauffe (setup short) : miroir inverse de get_squeeze_scan. Part des N candidats au funding le plus positif (longs qui payent cher), puis verifie pour chacun si l'OI monte encore (longs qui s'accumulent), si le CVD des 2 dernieres bougies 4h est net vendeur (distribution), si les liquidations recentes sont dominees par les longs (ratio longs/shorts >= seuil), et si le predicted funding Coinalyze est encore positif (pression maintenue). Signal : le marche est surlong, les longs commencent a se faire sortir - setup short squeeze inverse. ATTENTION COUT API : 1 + 3xN appels CoinGlass (N = candidateCount).",
+      {
+        candidateCount: z
+          .number()
+          .int()
+          .min(1)
+          .max(15)
+          .optional()
+          .describe("Nombre de candidats funding a approfondir (defaut 8)"),
+        minOiChangePct: z
+          .number()
+          .optional()
+          .describe("Seuil de hausse OI sur 4h en % (defaut 5)"),
+        minLiqRatio: z
+          .number()
+          .optional()
+          .describe("Ratio liquidations longs/shorts minimum (defaut 2)"),
+      },
+      async ({ candidateCount, minOiChangePct, minLiqRatio }) => {
+        try {
+          const fundingRaw = await CoinglassAPI.fundingRateByExchange();
+          const screener = buildFundingScreener(fundingRaw, {
+            limit: candidateCount ?? 8,
+            exchanges: ["Binance", "MEXC"],
+          });
+          const scan = await buildHeatScan(screener.mostPositiveHourly, {
+            minOiChangePct,
+            minLiqRatio,
+          });
+          return textResult({
+            criteria: { minOiChangePct: minOiChangePct ?? 5, minLiqRatio: minLiqRatio ?? 2 },
+            results: scan,
+            qualifyingCount: scan.filter((r) => r.qualifies).length,
+          });
         } catch (err) {
           return errorResult(err);
         }
