@@ -1,6 +1,9 @@
 import { createMcpHandler } from "mcp-handler";
 import { z } from "zod";
-import { CoinglassAPI, computeCvdSeries, CoinglassError } from "@/lib/coinglass";
+import { CoinglassAPI, computeCvdSeries, buildFundingScreener, CoinglassError } from "@/lib/coinglass";
+import { CoinalyzeAPI, CoinalyzeError } from "@/lib/coinalyze";
+import { BinanceAPI, BinanceError } from "@/lib/binance";
+import { MexcAPI, MexcError } from "@/lib/mexc";
 
 const SYMBOL = z.string().describe("Symbole de l'actif, ex: BTC, ETH, SOL");
 const INTERVAL = z
@@ -37,6 +40,12 @@ function errorResult(err: unknown) {
   const message =
     err instanceof CoinglassError
       ? `Erreur CoinGlass API (${err.status}) : ${JSON.stringify(err.body)}`
+      : err instanceof CoinalyzeError
+      ? `Erreur Coinalyze API (${err.status}) : ${JSON.stringify(err.body)}`
+      : err instanceof BinanceError
+      ? `Erreur Binance API (${err.status}) : ${JSON.stringify(err.body)}`
+      : err instanceof MexcError
+      ? `Erreur MEXC API (${err.status}) : ${JSON.stringify(err.body)}`
       : err instanceof Error
       ? err.message
       : "Erreur inconnue";
@@ -184,6 +193,181 @@ const handler = createMcpHandler(
             exchangeList,
           });
           return textResult(data);
+        } catch (err) {
+          return errorResult(err);
+        }
+      }
+    );
+
+    // --- Coinalyze (gratuit) : source complementaire, un seul exchange a la fois ---
+    // Interet principal : le prix (OHLCV) en dessous de 4h, absent de CoinGlass
+    // sur le plan Hobbyist. Les autres tools redondent avec CoinGlass mais servent
+    // de repli en cas de plan API depasse ou d'ecart entre les deux sources.
+
+    server.tool(
+      "get_price_history",
+      "PRIX (OHLCV) d'une paire sur un exchange, via Coinalyze - couvre les intervalles courts (1m/5m/15m) absents de CoinGlass sur le plan Hobbyist. A utiliser pour confirmer un trigger court terme sans avoir besoin d'un screenshot.",
+      { symbol: SYMBOL, exchange: EXCHANGE, interval: INTERVAL, limit: LIMIT },
+      async ({ symbol, exchange, interval, limit }) => {
+        try {
+          return textResult(await CoinalyzeAPI.ohlcvHistory({ symbol, exchange, interval, limit }));
+        } catch (err) {
+          return errorResult(err);
+        }
+      }
+    );
+
+    server.tool(
+      "get_coinalyze_funding_rate",
+      "Funding rate actuel (valeur unique) pour une paire sur un exchange, via Coinalyze. Repli gratuit si CoinGlass est indisponible.",
+      { symbol: SYMBOL, exchange: EXCHANGE },
+      async ({ symbol, exchange }) => {
+        try {
+          return textResult(await CoinalyzeAPI.fundingRateCurrent({ symbol, exchange }));
+        } catch (err) {
+          return errorResult(err);
+        }
+      }
+    );
+
+    server.tool(
+      "get_coinalyze_predicted_funding_rate",
+      "Funding rate PREDIT (prochaine periode, pas encore paye) pour une paire sur un exchange, via Coinalyze. CoinGlass ne donne que le funding actuel/historique, pas la prediction.",
+      { symbol: SYMBOL, exchange: EXCHANGE },
+      async ({ symbol, exchange }) => {
+        try {
+          return textResult(await CoinalyzeAPI.predictedFundingRateCurrent({ symbol, exchange }));
+        } catch (err) {
+          return errorResult(err);
+        }
+      }
+    );
+
+    server.tool(
+      "get_coinalyze_funding_rate_history",
+      "Historique du funding rate (OHLC) pour une paire sur un exchange, via Coinalyze. Repli gratuit si CoinGlass est indisponible.",
+      { symbol: SYMBOL, exchange: EXCHANGE, interval: INTERVAL, limit: LIMIT },
+      async ({ symbol, exchange, interval, limit }) => {
+        try {
+          return textResult(
+            await CoinalyzeAPI.fundingRateHistory({ symbol, exchange, interval, limit })
+          );
+        } catch (err) {
+          return errorResult(err);
+        }
+      }
+    );
+
+    server.tool(
+      "get_coinalyze_open_interest",
+      "Open interest actuel (USD) pour une paire sur un exchange, via Coinalyze. Repli gratuit si CoinGlass est indisponible.",
+      { symbol: SYMBOL, exchange: EXCHANGE },
+      async ({ symbol, exchange }) => {
+        try {
+          return textResult(await CoinalyzeAPI.openInterestCurrent({ symbol, exchange }));
+        } catch (err) {
+          return errorResult(err);
+        }
+      }
+    );
+
+    server.tool(
+      "get_coinalyze_open_interest_history",
+      "Historique de l'open interest (OHLC, USD) pour une paire sur un exchange, via Coinalyze. Repli gratuit si CoinGlass est indisponible.",
+      { symbol: SYMBOL, exchange: EXCHANGE, interval: INTERVAL, limit: LIMIT },
+      async ({ symbol, exchange, interval, limit }) => {
+        try {
+          return textResult(
+            await CoinalyzeAPI.openInterestHistory({ symbol, exchange, interval, limit })
+          );
+        } catch (err) {
+          return errorResult(err);
+        }
+      }
+    );
+
+    server.tool(
+      "get_coinalyze_liquidations",
+      "Historique des liquidations (longs/courts, USD) pour une paire sur un exchange, via Coinalyze. Repli gratuit si CoinGlass est indisponible.",
+      { symbol: SYMBOL, exchange: EXCHANGE, interval: INTERVAL, limit: LIMIT },
+      async ({ symbol, exchange, interval, limit }) => {
+        try {
+          return textResult(
+            await CoinalyzeAPI.liquidationHistory({ symbol, exchange, interval, limit })
+          );
+        } catch (err) {
+          return errorResult(err);
+        }
+      }
+    );
+
+    server.tool(
+      "get_coinalyze_long_short_ratio",
+      "Historique du ratio long/short (comptes globaux) pour une paire sur un exchange, via Coinalyze. Repli gratuit si CoinGlass est indisponible.",
+      { symbol: SYMBOL, exchange: EXCHANGE, interval: INTERVAL, limit: LIMIT },
+      async ({ symbol, exchange, interval, limit }) => {
+        try {
+          return textResult(
+            await CoinalyzeAPI.longShortRatioHistory({ symbol, exchange, interval, limit })
+          );
+        } catch (err) {
+          return errorResult(err);
+        }
+      }
+    );
+
+    // --- Binance / MEXC (API publiques, aucune cle) ---------------------------
+
+    server.tool(
+      "get_funding_screener",
+      "Scanne TOUS les symboles disponibles sur CoinGlass (Binance+MEXC par defaut) en un seul appel et renvoie les N taux de financement les plus negatifs et les plus positifs, NORMALISES A L'HEURE (le taux brut seul trompe : un symbole a -0.14%/1h paie plus vite qu'un symbole a -0.66%/4h, alors que le brut suggere l'inverse). Remplace directement le tableau 'Taux financement' de CoinGlass que Luc consultait par capture d'ecran - fonctionne sur l'abonnement Hobbyist existant, aucune config supplementaire.",
+      {
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(50)
+          .optional()
+          .describe("Nombre de symboles a retourner par cote (defaut 15)"),
+        exchanges: z
+          .string()
+          .optional()
+          .describe("Liste d'exchanges separes par virgule a inclure (defaut Binance,MEXC)"),
+      },
+      async ({ limit, exchanges }) => {
+        try {
+          const raw = await CoinglassAPI.fundingRateByExchange();
+          const result = buildFundingScreener(raw, {
+            limit,
+            exchanges: exchanges ? exchanges.split(",").map((e) => e.trim()) : undefined,
+          });
+          return textResult(result);
+        } catch (err) {
+          return errorResult(err);
+        }
+      }
+    );
+
+    server.tool(
+      "get_binance_funding_rate",
+      "Funding rate et prix actuels (mark price) pour UN symbole sur Binance, sans cle API. ATTENTION : Binance bloque les requetes en provenance d'infrastructures hebergees aux Etats-Unis (erreur 451, politique documentee depuis fin 2022) - si le deploiement Vercel tourne depuis une region US par defaut, ce tool echouera systematiquement. Preferer get_funding_screener (CoinGlass) qui fonctionne sans cette contrainte.",
+      { symbol: SYMBOL },
+      async ({ symbol }) => {
+        try {
+          return textResult(await BinanceAPI.fundingRate({ symbol }));
+        } catch (err) {
+          return errorResult(err);
+        }
+      }
+    );
+
+    server.tool(
+      "get_mexc_funding_rate",
+      "Funding rate actuel pour UN symbole sur MEXC, sans cle API. Pas de version bulk cote MEXC (contrairement a Binance) - sert a recouper un candidat deja identifie, pas a scanner tout le marche MEXC.",
+      { symbol: SYMBOL },
+      async ({ symbol }) => {
+        try {
+          return textResult(await MexcAPI.fundingRate({ symbol }));
         } catch (err) {
           return errorResult(err);
         }
