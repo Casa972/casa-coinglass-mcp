@@ -1,6 +1,8 @@
 // Client pour l'API CoinGlass V4 - chemins verifies contre la doc officielle
 // https://github.com/coinglass-official/coinglass-api-docs
 
+import { CoinalyzeAPI } from "@/lib/coinalyze";
+
 const BASE_URL = "https://open-api-v4.coinglass.com";
 
 export class CoinglassError extends Error {
@@ -260,6 +262,12 @@ export type SqueezeScanRow = FundingScreenerRow & {
   shortLiqUsd: number;
   longLiqUsd: number;
   shortLongLiqRatio: number | null;
+  // Predicted funding rate (Coinalyze, gratuit) - null si symbole absent de Coinalyze.
+  // Valeur brute telle que renvoyee par l'API (fraction, ex: -0.009464).
+  // predictedFundingNegative = true signifie que la pression short se maintient
+  // pour la prochaine periode ; false = le funding se retourne (signal negatif).
+  predictedFundingRateRaw: number | null;
+  predictedFundingNegative: boolean | null;
   qualifies: boolean;
   error?: string;
 };
@@ -275,7 +283,7 @@ export async function buildSqueezeScan(
   const results = await Promise.all(
     candidates.map(async (c): Promise<SqueezeScanRow> => {
       try {
-        const [oiRaw, cvdRaw, liqRaw] = await Promise.all([
+        const [oiRaw, cvdRaw, liqRaw, predictedRaw] = await Promise.all([
           CoinglassAPI.openInterestByExchange({ symbol: c.symbol }) as Promise<{
             data?: Array<{ exchange: string; open_interest_change_percent_4h?: number; open_interest_change_percent_1h?: number }>;
           }>,
@@ -283,6 +291,11 @@ export async function buildSqueezeScan(
           CoinglassAPI.liquidationAggregated({ symbol: c.symbol, interval: "4h", limit: lookback }) as Promise<{
             data?: Array<{ aggregated_long_liquidation_usd?: number; aggregated_short_liquidation_usd?: number }>;
           }>,
+          // Predicted funding rate via Coinalyze (gratuit). On attrape silencieusement
+          // les erreurs (symbole absent sur Coinalyze, cle manquante, etc.) pour ne
+          // pas faire echouer tout le scan si un seul candidat n'est pas reference.
+          CoinalyzeAPI.predictedFundingRateCurrent({ symbol: c.symbol, exchange: c.exchange })
+            .catch(() => null) as Promise<Array<{ value?: number }> | null>,
         ]);
 
         const oiAll = oiRaw.data?.find((d) => d.exchange === "All");
@@ -307,12 +320,25 @@ export async function buildSqueezeScan(
         const shortLongLiqRatio = longLiqUsd > 0 ? shortLiqUsd / longLiqUsd : shortLiqUsd > 0 ? null : null;
         // null quand longLiqUsd = 0 : ratio non-borne (tres favorable) plutot que Infinity (non serialisable proprement)
 
+        // Predicted funding rate Coinalyze
+        const predictedFundingRateRaw =
+          Array.isArray(predictedRaw) && predictedRaw.length > 0
+            ? (predictedRaw[0].value ?? null)
+            : null;
+        // null = Coinalyze indisponible ou symbole absent → on ne penalise pas
+        const predictedFundingNegative =
+          predictedFundingRateRaw !== null ? predictedFundingRateRaw < 0 : null;
+
         const qualifies =
           oiChangePercent4h !== null &&
           oiChangePercent4h >= minOiChangePct &&
           cvdRecentTrendPositive === true &&
           ((shortLongLiqRatio !== null && shortLongLiqRatio >= minLiqRatio) ||
-            (longLiqUsd === 0 && shortLiqUsd > 0));
+            (longLiqUsd === 0 && shortLiqUsd > 0)) &&
+          // Si Coinalyze a repondu et que le predicted est positif, le funding se
+          // retourne - setup invalide. Si Coinalyze est indisponible (null), on
+          // laisse passer et on se base sur les 3 autres criteres.
+          predictedFundingNegative !== false;
 
         return {
           ...c,
@@ -323,6 +349,8 @@ export async function buildSqueezeScan(
           shortLiqUsd,
           longLiqUsd,
           shortLongLiqRatio,
+          predictedFundingRateRaw,
+          predictedFundingNegative,
           qualifies,
         };
       } catch (err) {
@@ -335,6 +363,8 @@ export async function buildSqueezeScan(
           shortLiqUsd: 0,
           longLiqUsd: 0,
           shortLongLiqRatio: null,
+          predictedFundingRateRaw: null,
+          predictedFundingNegative: null,
           qualifies: false,
           error: err instanceof Error ? err.message : "erreur inconnue",
         };
