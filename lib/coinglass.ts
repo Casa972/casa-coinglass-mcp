@@ -274,111 +274,109 @@ export type SqueezeScanRow = FundingScreenerRow & {
 
 export async function buildSqueezeScan(
   candidates: FundingScreenerRow[],
-  opts: { minOiChangePct?: number; minLiqRatio?: number; liqLookbackPeriods?: number } = {}
+  opts: { minOiChangePct?: number; minLiqRatio?: number; liqLookbackPeriods?: number; maxResults?: number } = {}
 ): Promise<SqueezeScanRow[]> {
   const minOiChangePct = opts.minOiChangePct ?? 5;
   const minLiqRatio = opts.minLiqRatio ?? 2;
   const lookback = opts.liqLookbackPeriods ?? 6;
-
-  // Traitement sequentiel avec pause entre chaque candidat pour ne pas
-  // exploser le rate limit CoinGlass Hobbyist (30 req/min). Chaque candidat
-  // consomme 3 appels CoinGlass + 1 Coinalyze ; avec 8 candidats en parallele
-  // on enverrait 24 requetes simultanees et la majorite echouerait en 429.
+  const maxResults = opts.maxResults ?? candidates.length;
+  // Delai entre candidats couverts uniquement. Les coins sans donnees CoinGlass
+  // sont sautes immediatement apres le check OI (1 appel), sans delai, ce qui
+  // evite de gaspiller des slots et du temps sur des coins MEXC non couverts.
   const DELAY_MS = 2000;
 
   const results: SqueezeScanRow[] = [];
-  for (let i = 0; i < candidates.length; i++) {
-    if (i > 0) await new Promise((r) => setTimeout(r, DELAY_MS));
+  let validCount = 0;
+
+  for (let i = 0; i < candidates.length && validCount < maxResults; i++) {
     const c = candidates[i];
-    results.push(await (async (): Promise<SqueezeScanRow> => {
-      try {
-        const [oiRaw, cvdRaw, liqRaw, predictedRaw] = await Promise.all([
-          CoinglassAPI.openInterestByExchange({ symbol: c.symbol }) as Promise<{
-            data?: Array<{ exchange: string; open_interest_change_percent_4h?: number; open_interest_change_percent_1h?: number }>;
-          }>,
-          CoinglassAPI.aggregatedTakerBuySellVolume({ symbol: c.symbol, interval: "4h", limit: lookback }),
-          CoinglassAPI.liquidationAggregated({ symbol: c.symbol, interval: "4h", limit: lookback }) as Promise<{
-            data?: Array<{ aggregated_long_liquidation_usd?: number; aggregated_short_liquidation_usd?: number }>;
-          }>,
-          // Predicted funding rate via Coinalyze (gratuit). On attrape silencieusement
-          // les erreurs (symbole absent sur Coinalyze, cle manquante, etc.) pour ne
-          // pas faire echouer tout le scan si un seul candidat n'est pas reference.
-          CoinalyzeAPI.predictedFundingRateCurrent({ symbol: c.symbol, exchange: c.exchange })
-            .catch(() => null) as Promise<Array<{ value?: number }> | null>,
-        ]);
 
-        const oiAll = oiRaw.data?.find((d) => d.exchange === "All");
-        const oiChangePercent4h = oiAll?.open_interest_change_percent_4h ?? null;
-        const oiChangePercent1h = oiAll?.open_interest_change_percent_1h ?? null;
+    // --- Etape 1 : check OI seul (1 appel). Si aucune donnee, on saute ---
+    const oiRaw = await CoinglassAPI.openInterestByExchange({ symbol: c.symbol }) as {
+      data?: Array<{ exchange: string; open_interest_change_percent_4h?: number; open_interest_change_percent_1h?: number }>;
+    };
+    const oiAll = oiRaw.data?.find((d) => d.exchange === "All");
 
-        const cvdSeries = computeCvdSeries(
-          (cvdRaw.data ?? []).map((d) => ({
-            time: d.time,
-            buyVol: Number(d.aggregated_buy_volume_usd),
-            sellVol: Number(d.aggregated_sell_volume_usd),
-          }))
-        );
-        const lastTwo = cvdSeries.slice(-2);
-        const cvdLastDeltaUsd = cvdSeries.length ? cvdSeries[cvdSeries.length - 1].delta : null;
-        const cvdRecentTrendPositive =
-          lastTwo.length > 0 ? lastTwo.reduce((s, p) => s + p.delta, 0) > 0 : null;
+    if (!oiAll) continue; // Coin non couvert par CoinGlass Hobbyist, on passe
 
-        const liqData = liqRaw.data ?? [];
-        const shortLiqUsd = liqData.reduce((s, d) => s + Number(d.aggregated_short_liquidation_usd ?? 0), 0);
-        const longLiqUsd = liqData.reduce((s, d) => s + Number(d.aggregated_long_liquidation_usd ?? 0), 0);
-        const shortLongLiqRatio = longLiqUsd > 0 ? shortLiqUsd / longLiqUsd : shortLiqUsd > 0 ? null : null;
-        // null quand longLiqUsd = 0 : ratio non-borne (tres favorable) plutot que Infinity (non serialisable proprement)
+    validCount++;
+    if (validCount > 1) await new Promise((r) => setTimeout(r, DELAY_MS));
 
-        // Predicted funding rate Coinalyze
-        const predictedFundingRateRaw =
-          Array.isArray(predictedRaw) && predictedRaw.length > 0
-            ? (predictedRaw[0].value ?? null)
-            : null;
-        // null = Coinalyze indisponible ou symbole absent → on ne penalise pas
-        const predictedFundingNegative =
-          predictedFundingRateRaw !== null ? predictedFundingRateRaw < 0 : null;
+    // --- Etape 2 : scan complet (CVD + liquidations + predicted) ---
+    try {
+      const oiChangePercent4h = oiAll.open_interest_change_percent_4h ?? null;
+      const oiChangePercent1h = oiAll.open_interest_change_percent_1h ?? null;
 
-        const qualifies =
-          oiChangePercent4h !== null &&
-          oiChangePercent4h >= minOiChangePct &&
-          cvdRecentTrendPositive === true &&
-          ((shortLongLiqRatio !== null && shortLongLiqRatio >= minLiqRatio) ||
-            (longLiqUsd === 0 && shortLiqUsd > 0)) &&
-          // Si Coinalyze a repondu et que le predicted est positif, le funding se
-          // retourne - setup invalide. Si Coinalyze est indisponible (null), on
-          // laisse passer et on se base sur les 3 autres criteres.
-          predictedFundingNegative !== false;
+      const [cvdRaw, liqRaw, predictedRaw] = await Promise.all([
+        CoinglassAPI.aggregatedTakerBuySellVolume({ symbol: c.symbol, interval: "4h", limit: lookback }),
+        CoinglassAPI.liquidationAggregated({ symbol: c.symbol, interval: "4h", limit: lookback }) as Promise<{
+          data?: Array<{ aggregated_long_liquidation_usd?: number; aggregated_short_liquidation_usd?: number }>;
+        }>,
+        CoinalyzeAPI.predictedFundingRateCurrent({ symbol: c.symbol, exchange: c.exchange })
+          .catch(() => null) as Promise<Array<{ value?: number }> | null>,
+      ]);
 
-        return {
-          ...c,
-          oiChangePercent4h,
-          oiChangePercent1h,
-          cvdRecentTrendPositive,
-          cvdLastDeltaUsd,
-          shortLiqUsd,
-          longLiqUsd,
-          shortLongLiqRatio,
-          predictedFundingRateRaw,
-          predictedFundingNegative,
-          qualifies,
-        };
-      } catch (err) {
-        return {
-          ...c,
-          oiChangePercent4h: null,
-          oiChangePercent1h: null,
-          cvdRecentTrendPositive: null,
-          cvdLastDeltaUsd: null,
-          shortLiqUsd: 0,
-          longLiqUsd: 0,
-          shortLongLiqRatio: null,
-          predictedFundingRateRaw: null,
-          predictedFundingNegative: null,
-          qualifies: false,
-          error: err instanceof Error ? err.message : "erreur inconnue",
-        };
-      }
-    })());
+      const cvdSeries = computeCvdSeries(
+        (cvdRaw.data ?? []).map((d) => ({
+          time: d.time,
+          buyVol: Number(d.aggregated_buy_volume_usd),
+          sellVol: Number(d.aggregated_sell_volume_usd),
+        }))
+      );
+      const lastTwo = cvdSeries.slice(-2);
+      const cvdLastDeltaUsd = cvdSeries.length ? cvdSeries[cvdSeries.length - 1].delta : null;
+      const cvdRecentTrendPositive =
+        lastTwo.length > 0 ? lastTwo.reduce((s, p) => s + p.delta, 0) > 0 : null;
+
+      const liqData = (liqRaw as any).data ?? [];
+      const shortLiqUsd = liqData.reduce((s: number, d: any) => s + Number(d.aggregated_short_liquidation_usd ?? 0), 0);
+      const longLiqUsd = liqData.reduce((s: number, d: any) => s + Number(d.aggregated_long_liquidation_usd ?? 0), 0);
+      const shortLongLiqRatio = longLiqUsd > 0 ? shortLiqUsd / longLiqUsd : shortLiqUsd > 0 ? null : null;
+
+      const predictedFundingRateRaw =
+        Array.isArray(predictedRaw) && predictedRaw.length > 0
+          ? (predictedRaw[0].value ?? null)
+          : null;
+      const predictedFundingNegative =
+        predictedFundingRateRaw !== null ? predictedFundingRateRaw < 0 : null;
+
+      const qualifies =
+        oiChangePercent4h !== null &&
+        oiChangePercent4h >= minOiChangePct &&
+        cvdRecentTrendPositive === true &&
+        ((shortLongLiqRatio !== null && shortLongLiqRatio >= minLiqRatio) ||
+          (longLiqUsd === 0 && shortLiqUsd > 0)) &&
+        predictedFundingNegative !== false;
+
+      results.push({
+        ...c,
+        oiChangePercent4h,
+        oiChangePercent1h,
+        cvdRecentTrendPositive,
+        cvdLastDeltaUsd,
+        shortLiqUsd,
+        longLiqUsd,
+        shortLongLiqRatio,
+        predictedFundingRateRaw,
+        predictedFundingNegative,
+        qualifies,
+      });
+    } catch (err) {
+      results.push({
+        ...c,
+        oiChangePercent4h: null,
+        oiChangePercent1h: null,
+        cvdRecentTrendPositive: null,
+        cvdLastDeltaUsd: null,
+        shortLiqUsd: 0,
+        longLiqUsd: 0,
+        shortLongLiqRatio: null,
+        predictedFundingRateRaw: null,
+        predictedFundingNegative: null,
+        qualifies: false,
+        error: err instanceof Error ? err.message : "erreur inconnue",
+      });
+    }
   }
 
   return results.sort((a, b) => Number(b.qualifies) - Number(a.qualifies));
@@ -404,99 +402,107 @@ export type HeatScanRow = FundingScreenerRow & {
 
 export async function buildHeatScan(
   candidates: FundingScreenerRow[],
-  opts: { minOiChangePct?: number; minLiqRatio?: number; liqLookbackPeriods?: number } = {}
+  opts: { minOiChangePct?: number; minLiqRatio?: number; liqLookbackPeriods?: number; maxResults?: number } = {}
 ): Promise<HeatScanRow[]> {
   const minOiChangePct = opts.minOiChangePct ?? 5;
   const minLiqRatio = opts.minLiqRatio ?? 2;
   const lookback = opts.liqLookbackPeriods ?? 6;
-  const DELAY_MS = 2500;
+  const maxResults = opts.maxResults ?? candidates.length;
+  const DELAY_MS = 2000;
 
   const results: HeatScanRow[] = [];
-  for (let i = 0; i < candidates.length; i++) {
-    if (i > 0) await new Promise((r) => setTimeout(r, DELAY_MS));
+  let validCount = 0;
+
+  for (let i = 0; i < candidates.length && validCount < maxResults; i++) {
     const c = candidates[i];
-    results.push(await (async (): Promise<HeatScanRow> => {
-      try {
-        const [oiRaw, cvdRaw, liqRaw, predictedRaw] = await Promise.all([
-          CoinglassAPI.openInterestByExchange({ symbol: c.symbol }) as Promise<{
-            data?: Array<{ exchange: string; open_interest_change_percent_4h?: number; open_interest_change_percent_1h?: number }>;
-          }>,
-          CoinglassAPI.aggregatedTakerBuySellVolume({ symbol: c.symbol, interval: "4h", limit: lookback }),
-          CoinglassAPI.liquidationAggregated({ symbol: c.symbol, interval: "4h", limit: lookback }) as Promise<{
-            data?: Array<{ aggregated_long_liquidation_usd?: number; aggregated_short_liquidation_usd?: number }>;
-          }>,
-          CoinalyzeAPI.predictedFundingRateCurrent({ symbol: c.symbol, exchange: c.exchange })
-            .catch(() => null) as Promise<Array<{ value?: number }> | null>,
-        ]);
 
-        const oiAll = oiRaw.data?.find((d) => d.exchange === "All");
-        const oiChangePercent4h = oiAll?.open_interest_change_percent_4h ?? null;
-        const oiChangePercent1h = oiAll?.open_interest_change_percent_1h ?? null;
+    // --- Etape 1 : check OI seul (1 appel). Si aucune donnee, on saute ---
+    const oiRaw = await CoinglassAPI.openInterestByExchange({ symbol: c.symbol }) as {
+      data?: Array<{ exchange: string; open_interest_change_percent_4h?: number; open_interest_change_percent_1h?: number }>;
+    };
+    const oiAll = oiRaw.data?.find((d) => d.exchange === "All");
 
-        const cvdSeries = computeCvdSeries(
-          (cvdRaw.data ?? []).map((d) => ({
-            time: d.time,
-            buyVol: Number(d.aggregated_buy_volume_usd),
-            sellVol: Number(d.aggregated_sell_volume_usd),
-          }))
-        );
-        const lastTwo = cvdSeries.slice(-2);
-        const cvdLastDeltaUsd = cvdSeries.length ? cvdSeries[cvdSeries.length - 1].delta : null;
-        const cvdRecentTrendPositive =
-          lastTwo.length > 0 ? lastTwo.reduce((s, p) => s + p.delta, 0) > 0 : null;
+    if (!oiAll) continue; // Coin non couvert par CoinGlass Hobbyist, on passe
 
-        const liqData = liqRaw.data ?? [];
-        const shortLiqUsd = liqData.reduce((s, d) => s + Number(d.aggregated_short_liquidation_usd ?? 0), 0);
-        const longLiqUsd = liqData.reduce((s, d) => s + Number(d.aggregated_long_liquidation_usd ?? 0), 0);
-        // Ratio inverse : longs liquidés / shorts liquidés
-        const longShortLiqRatio = shortLiqUsd > 0 ? longLiqUsd / shortLiqUsd : longLiqUsd > 0 ? null : null;
+    validCount++;
+    if (validCount > 1) await new Promise((r) => setTimeout(r, DELAY_MS));
 
-        const predictedFundingRateRaw =
-          Array.isArray(predictedRaw) && predictedRaw.length > 0
-            ? (predictedRaw[0].value ?? null)
-            : null;
-        const predictedFundingPositive =
-          predictedFundingRateRaw !== null ? predictedFundingRateRaw > 0 : null;
+    // --- Etape 2 : scan complet (CVD + liquidations + predicted) ---
+    try {
+      const oiChangePercent4h = oiAll.open_interest_change_percent_4h ?? null;
+      const oiChangePercent1h = oiAll.open_interest_change_percent_1h ?? null;
 
-        const qualifies =
-          oiChangePercent4h !== null &&
-          oiChangePercent4h >= minOiChangePct &&
-          cvdRecentTrendPositive === false &&
-          ((longShortLiqRatio !== null && longShortLiqRatio >= minLiqRatio) ||
-            (shortLiqUsd === 0 && longLiqUsd > 0)) &&
-          // Predicted funding toujours positif = longs continuent de payer, pression maintenue
-          predictedFundingPositive !== false;
+      const [cvdRaw, liqRaw, predictedRaw] = await Promise.all([
+        CoinglassAPI.aggregatedTakerBuySellVolume({ symbol: c.symbol, interval: "4h", limit: lookback }),
+        CoinglassAPI.liquidationAggregated({ symbol: c.symbol, interval: "4h", limit: lookback }) as Promise<{
+          data?: Array<{ aggregated_long_liquidation_usd?: number; aggregated_short_liquidation_usd?: number }>;
+        }>,
+        CoinalyzeAPI.predictedFundingRateCurrent({ symbol: c.symbol, exchange: c.exchange })
+          .catch(() => null) as Promise<Array<{ value?: number }> | null>,
+      ]);
 
-        return {
-          ...c,
-          oiChangePercent4h,
-          oiChangePercent1h,
-          cvdRecentTrendPositive,
-          cvdLastDeltaUsd,
-          shortLiqUsd,
-          longLiqUsd,
-          longShortLiqRatio,
-          predictedFundingRateRaw,
-          predictedFundingPositive,
-          qualifies,
-        };
-      } catch (err) {
-        return {
-          ...c,
-          oiChangePercent4h: null,
-          oiChangePercent1h: null,
-          cvdRecentTrendPositive: null,
-          cvdLastDeltaUsd: null,
-          shortLiqUsd: 0,
-          longLiqUsd: 0,
-          longShortLiqRatio: null,
-          predictedFundingRateRaw: null,
-          predictedFundingPositive: null,
-          qualifies: false,
-          error: err instanceof Error ? err.message : "erreur inconnue",
-        };
-      }
-    })());
+      const cvdSeries = computeCvdSeries(
+        (cvdRaw.data ?? []).map((d) => ({
+          time: d.time,
+          buyVol: Number(d.aggregated_buy_volume_usd),
+          sellVol: Number(d.aggregated_sell_volume_usd),
+        }))
+      );
+      const lastTwo = cvdSeries.slice(-2);
+      const cvdLastDeltaUsd = cvdSeries.length ? cvdSeries[cvdSeries.length - 1].delta : null;
+      const cvdRecentTrendPositive =
+        lastTwo.length > 0 ? lastTwo.reduce((s, p) => s + p.delta, 0) > 0 : null;
+
+      const liqData = (liqRaw as any).data ?? [];
+      const shortLiqUsd = liqData.reduce((s: number, d: any) => s + Number(d.aggregated_short_liquidation_usd ?? 0), 0);
+      const longLiqUsd = liqData.reduce((s: number, d: any) => s + Number(d.aggregated_long_liquidation_usd ?? 0), 0);
+      // Ratio inverse : longs liquidés / shorts liquidés
+      const longShortLiqRatio = shortLiqUsd > 0 ? longLiqUsd / shortLiqUsd : longLiqUsd > 0 ? null : null;
+
+      const predictedFundingRateRaw =
+        Array.isArray(predictedRaw) && predictedRaw.length > 0
+          ? (predictedRaw[0].value ?? null)
+          : null;
+      const predictedFundingPositive =
+        predictedFundingRateRaw !== null ? predictedFundingRateRaw > 0 : null;
+
+      const qualifies =
+        oiChangePercent4h !== null &&
+        oiChangePercent4h >= minOiChangePct &&
+        cvdRecentTrendPositive === false &&
+        ((longShortLiqRatio !== null && longShortLiqRatio >= minLiqRatio) ||
+          (shortLiqUsd === 0 && longLiqUsd > 0)) &&
+        predictedFundingPositive !== false;
+
+      results.push({
+        ...c,
+        oiChangePercent4h,
+        oiChangePercent1h,
+        cvdRecentTrendPositive,
+        cvdLastDeltaUsd,
+        shortLiqUsd,
+        longLiqUsd,
+        longShortLiqRatio,
+        predictedFundingRateRaw,
+        predictedFundingPositive,
+        qualifies,
+      });
+    } catch (err) {
+      results.push({
+        ...c,
+        oiChangePercent4h: null,
+        oiChangePercent1h: null,
+        cvdRecentTrendPositive: null,
+        cvdLastDeltaUsd: null,
+        shortLiqUsd: 0,
+        longLiqUsd: 0,
+        longShortLiqRatio: null,
+        predictedFundingRateRaw: null,
+        predictedFundingPositive: null,
+        qualifies: false,
+        error: err instanceof Error ? err.message : "erreur inconnue",
+      });
+    }
   }
 
   return results.sort((a, b) => Number(b.qualifies) - Number(a.qualifies));

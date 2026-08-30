@@ -27,12 +27,13 @@ export async function GET(request: Request) {
   try {
     const fundingRaw = await CoinglassAPI.fundingRateByExchange();
     const screener = buildFundingScreener(fundingRaw, {
-      limit: candidateCount,
+      limit: candidateCount * 2,
       exchanges: ["Binance", "MEXC"],
     });
     const scan = await buildHeatScan(screener.mostPositiveHourly, {
       minOiChangePct,
       minLiqRatio,
+      maxResults: candidateCount,
     });
 
     return Response.json({

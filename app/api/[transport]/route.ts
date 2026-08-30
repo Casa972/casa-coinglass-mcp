@@ -371,13 +371,15 @@ const handler = createMcpHandler(
       async ({ candidateCount, minOiChangePct, minLiqRatio }) => {
         try {
           const fundingRaw = await CoinglassAPI.fundingRateByExchange();
+          const n = candidateCount ?? 8;
           const screener = buildFundingScreener(fundingRaw, {
-            limit: candidateCount ?? 8,
+            limit: n * 2,
             exchanges: ["Binance", "MEXC"],
           });
           const scan = await buildSqueezeScan(screener.mostNegativeHourly, {
             minOiChangePct,
             minLiqRatio,
+            maxResults: n,
           });
           return textResult({
             criteria: { minOiChangePct: minOiChangePct ?? 5, minLiqRatio: minLiqRatio ?? 2 },
@@ -438,13 +440,15 @@ const handler = createMcpHandler(
       async ({ candidateCount, minOiChangePct, minLiqRatio }) => {
         try {
           const fundingRaw = await CoinglassAPI.fundingRateByExchange();
+          const n = candidateCount ?? 8;
           const screener = buildFundingScreener(fundingRaw, {
-            limit: candidateCount ?? 8,
+            limit: n * 2,
             exchanges: ["Binance", "MEXC"],
           });
           const scan = await buildHeatScan(screener.mostPositiveHourly, {
             minOiChangePct,
             minLiqRatio,
+            maxResults: n,
           });
           return textResult({
             criteria: { minOiChangePct: minOiChangePct ?? 5, minLiqRatio: minLiqRatio ?? 2 },
