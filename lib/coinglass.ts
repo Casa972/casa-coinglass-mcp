@@ -284,8 +284,7 @@ export async function buildSqueezeScan(
   // exploser le rate limit CoinGlass Hobbyist (30 req/min). Chaque candidat
   // consomme 3 appels CoinGlass + 1 Coinalyze ; avec 8 candidats en parallele
   // on enverrait 24 requetes simultanees et la majorite echouerait en 429.
-  const DELAY_MS = 2500; // 3 appels / 2.5s = ~72 req/min max si on etait seul,
-  // mais avec le screener initial et la marge on reste sous 30/min en pratique.
+  const DELAY_MS = 2000;
 
   const results: SqueezeScanRow[] = [];
   for (let i = 0; i < candidates.length; i++) {
