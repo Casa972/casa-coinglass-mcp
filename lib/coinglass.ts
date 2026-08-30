@@ -187,3 +187,59 @@ export function computeCvdSeries(
     return { time: point.time, delta, cvd: cumulative };
   });
 }
+
+// Screener funding rate : traite le dump complet (~2000 symboles) cote
+// serveur et ne renvoie que le top N par cote, NORMALISE A L'HEURE - le
+// champ funding_rate est deja en % (ex: -0.9464 = -0.9464%), donc pas de
+// *100 ici. Sans cette normalisation un symbole a intervalle 1h (ex: ZKC)
+// peut sembler moins extreme qu'un symbole a 4h alors qu'il paie plus vite.
+type FundingScreenerRow = {
+  symbol: string;
+  exchange: string;
+  fundingRatePerInterval: number;
+  intervalHours: number;
+  fundingRateHourly: number;
+};
+
+export function buildFundingScreener(
+  raw: { data?: Array<{ symbol: string; stablecoin_margin_list?: Array<{ exchange: string; funding_rate?: number; funding_rate_interval?: number }> }> },
+  opts: { limit?: number; exchanges?: string[] } = {}
+) {
+  const exchanges = opts.exchanges ?? ["Binance", "MEXC"];
+  const limit = opts.limit ?? 15;
+
+  const rows: FundingScreenerRow[] = [];
+  for (const entry of raw.data ?? []) {
+    for (const ex of entry.stablecoin_margin_list ?? []) {
+      if (!exchanges.includes(ex.exchange)) continue;
+      if (ex.funding_rate === undefined || !ex.funding_rate_interval) continue;
+      rows.push({
+        symbol: entry.symbol,
+        exchange: ex.exchange,
+        fundingRatePerInterval: ex.funding_rate,
+        intervalHours: ex.funding_rate_interval,
+        fundingRateHourly: ex.funding_rate / ex.funding_rate_interval,
+      });
+    }
+  }
+
+  // Garde la ligne la plus extreme par symbole (peu importe l'exchange) pour
+  // chaque cote, pour eviter de polluer le top avec Binance+MEXC du meme coin.
+  const worstBySymbol = new Map<string, FundingScreenerRow>();
+  const bestBySymbol = new Map<string, FundingScreenerRow>();
+  for (const r of rows) {
+    const w = worstBySymbol.get(r.symbol);
+    if (!w || r.fundingRateHourly < w.fundingRateHourly) worstBySymbol.set(r.symbol, r);
+    const b = bestBySymbol.get(r.symbol);
+    if (!b || r.fundingRateHourly > b.fundingRateHourly) bestBySymbol.set(r.symbol, r);
+  }
+
+  const mostNegativeHourly = [...worstBySymbol.values()]
+    .sort((a, b) => a.fundingRateHourly - b.fundingRateHourly)
+    .slice(0, limit);
+  const mostPositiveHourly = [...bestBySymbol.values()]
+    .sort((a, b) => b.fundingRateHourly - a.fundingRateHourly)
+    .slice(0, limit);
+
+  return { mostNegativeHourly, mostPositiveHourly };
+}
