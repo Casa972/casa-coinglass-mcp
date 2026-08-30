@@ -280,8 +280,18 @@ export async function buildSqueezeScan(
   const minLiqRatio = opts.minLiqRatio ?? 2;
   const lookback = opts.liqLookbackPeriods ?? 6;
 
-  const results = await Promise.all(
-    candidates.map(async (c): Promise<SqueezeScanRow> => {
+  // Traitement sequentiel avec pause entre chaque candidat pour ne pas
+  // exploser le rate limit CoinGlass Hobbyist (30 req/min). Chaque candidat
+  // consomme 3 appels CoinGlass + 1 Coinalyze ; avec 8 candidats en parallele
+  // on enverrait 24 requetes simultanees et la majorite echouerait en 429.
+  const DELAY_MS = 2500; // 3 appels / 2.5s = ~72 req/min max si on etait seul,
+  // mais avec le screener initial et la marge on reste sous 30/min en pratique.
+
+  const results: SqueezeScanRow[] = [];
+  for (let i = 0; i < candidates.length; i++) {
+    if (i > 0) await new Promise((r) => setTimeout(r, DELAY_MS));
+    const c = candidates[i];
+    results.push(await (async (): Promise<SqueezeScanRow> => {
       try {
         const [oiRaw, cvdRaw, liqRaw, predictedRaw] = await Promise.all([
           CoinglassAPI.openInterestByExchange({ symbol: c.symbol }) as Promise<{
@@ -369,8 +379,8 @@ export async function buildSqueezeScan(
           error: err instanceof Error ? err.message : "erreur inconnue",
         };
       }
-    })
-  );
+    })());
+  }
 
   return results.sort((a, b) => Number(b.qualifies) - Number(a.qualifies));
 }
