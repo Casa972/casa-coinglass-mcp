@@ -243,3 +243,104 @@ export function buildFundingScreener(
 
   return { mostNegativeHourly, mostPositiveHourly };
 }
+
+// Scan multi-criteres : reproduit la confluence identifiee manuellement sur
+// HNT avant son pump de +19% (funding tres negatif + OI qui construit + CVD
+// acheteur net + liquidations dominees par les shorts). Part des candidats
+// deja tries par buildFundingScreener puis approfondit chacun.
+//
+// COUT API : 1 (screener) + 3 appels par candidat. Le plan Hobbyist est
+// limite a 30 requetes/minute - garder candidateCount <= 8 en usage normal
+// pour laisser de la marge si Luc utilise d'autres tools en parallele.
+export type SqueezeScanRow = FundingScreenerRow & {
+  oiChangePercent4h: number | null;
+  oiChangePercent1h: number | null;
+  cvdRecentTrendPositive: boolean | null;
+  cvdLastDeltaUsd: number | null;
+  shortLiqUsd: number;
+  longLiqUsd: number;
+  shortLongLiqRatio: number | null;
+  qualifies: boolean;
+  error?: string;
+};
+
+export async function buildSqueezeScan(
+  candidates: FundingScreenerRow[],
+  opts: { minOiChangePct?: number; minLiqRatio?: number; liqLookbackPeriods?: number } = {}
+): Promise<SqueezeScanRow[]> {
+  const minOiChangePct = opts.minOiChangePct ?? 5;
+  const minLiqRatio = opts.minLiqRatio ?? 2;
+  const lookback = opts.liqLookbackPeriods ?? 6;
+
+  const results = await Promise.all(
+    candidates.map(async (c): Promise<SqueezeScanRow> => {
+      try {
+        const [oiRaw, cvdRaw, liqRaw] = await Promise.all([
+          CoinglassAPI.openInterestByExchange({ symbol: c.symbol }) as Promise<{
+            data?: Array<{ exchange: string; open_interest_change_percent_4h?: number; open_interest_change_percent_1h?: number }>;
+          }>,
+          CoinglassAPI.aggregatedTakerBuySellVolume({ symbol: c.symbol, interval: "4h", limit: lookback }),
+          CoinglassAPI.liquidationAggregated({ symbol: c.symbol, interval: "4h", limit: lookback }) as Promise<{
+            data?: Array<{ aggregated_long_liquidation_usd?: number; aggregated_short_liquidation_usd?: number }>;
+          }>,
+        ]);
+
+        const oiAll = oiRaw.data?.find((d) => d.exchange === "All");
+        const oiChangePercent4h = oiAll?.open_interest_change_percent_4h ?? null;
+        const oiChangePercent1h = oiAll?.open_interest_change_percent_1h ?? null;
+
+        const cvdSeries = computeCvdSeries(
+          (cvdRaw.data ?? []).map((d) => ({
+            time: d.time,
+            buyVol: Number(d.aggregated_buy_volume_usd),
+            sellVol: Number(d.aggregated_sell_volume_usd),
+          }))
+        );
+        const lastTwo = cvdSeries.slice(-2);
+        const cvdLastDeltaUsd = cvdSeries.length ? cvdSeries[cvdSeries.length - 1].delta : null;
+        const cvdRecentTrendPositive =
+          lastTwo.length > 0 ? lastTwo.reduce((s, p) => s + p.delta, 0) > 0 : null;
+
+        const liqData = liqRaw.data ?? [];
+        const shortLiqUsd = liqData.reduce((s, d) => s + Number(d.aggregated_short_liquidation_usd ?? 0), 0);
+        const longLiqUsd = liqData.reduce((s, d) => s + Number(d.aggregated_long_liquidation_usd ?? 0), 0);
+        const shortLongLiqRatio = longLiqUsd > 0 ? shortLiqUsd / longLiqUsd : shortLiqUsd > 0 ? null : null;
+        // null quand longLiqUsd = 0 : ratio non-borne (tres favorable) plutot que Infinity (non serialisable proprement)
+
+        const qualifies =
+          oiChangePercent4h !== null &&
+          oiChangePercent4h >= minOiChangePct &&
+          cvdRecentTrendPositive === true &&
+          ((shortLongLiqRatio !== null && shortLongLiqRatio >= minLiqRatio) ||
+            (longLiqUsd === 0 && shortLiqUsd > 0));
+
+        return {
+          ...c,
+          oiChangePercent4h,
+          oiChangePercent1h,
+          cvdRecentTrendPositive,
+          cvdLastDeltaUsd,
+          shortLiqUsd,
+          longLiqUsd,
+          shortLongLiqRatio,
+          qualifies,
+        };
+      } catch (err) {
+        return {
+          ...c,
+          oiChangePercent4h: null,
+          oiChangePercent1h: null,
+          cvdRecentTrendPositive: null,
+          cvdLastDeltaUsd: null,
+          shortLiqUsd: 0,
+          longLiqUsd: 0,
+          shortLongLiqRatio: null,
+          qualifies: false,
+          error: err instanceof Error ? err.message : "erreur inconnue",
+        };
+      }
+    })
+  );
+
+  return results.sort((a, b) => Number(b.qualifies) - Number(a.qualifies));
+}

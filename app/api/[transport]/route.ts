@@ -1,6 +1,6 @@
 import { createMcpHandler } from "mcp-handler";
 import { z } from "zod";
-import { CoinglassAPI, computeCvdSeries, buildFundingScreener, CoinglassError } from "@/lib/coinglass";
+import { CoinglassAPI, computeCvdSeries, buildFundingScreener, buildSqueezeScan, CoinglassError } from "@/lib/coinglass";
 import { CoinalyzeAPI, CoinalyzeError } from "@/lib/coinalyze";
 import { BinanceAPI, BinanceError } from "@/lib/binance";
 import { MexcAPI, MexcError } from "@/lib/mexc";
@@ -342,6 +342,47 @@ const handler = createMcpHandler(
             exchanges: exchanges ? exchanges.split(",").map((e) => e.trim()) : undefined,
           });
           return textResult(result);
+        } catch (err) {
+          return errorResult(err);
+        }
+      }
+    );
+
+    server.tool(
+      "get_squeeze_scan",
+      "Scan multi-criteres qui reproduit la confluence identifiee manuellement sur HNT avant son pump de +19% : part des N candidats au funding le plus negatif (comme get_funding_screener), puis verifie pour chacun si l'OI construit (hausse >= seuil sur 4h), si le CVD des 2 dernieres bougies 4h est net acheteur, et si les liquidations recentes sont dominees par les shorts (ratio courts/longs >= seuil). Renvoie tous les candidats testes avec 'qualifies: true/false' et leurs metriques, pas seulement ceux qui passent - utile pour voir POURQUOI un candidat est ecarte. ATTENTION COUT API : 1 + 3xN appels CoinGlass (N = candidateCount). Le plan Hobbyist est limite a 30 requetes/minute - garder candidateCount <= 8 pour laisser de la marge si d'autres tools sont utilises dans la meme minute.",
+      {
+        candidateCount: z
+          .number()
+          .int()
+          .min(1)
+          .max(15)
+          .optional()
+          .describe("Nombre de candidats funding a approfondir (defaut 8 ; deconseille au-dela de 8-9 sur le plan Hobbyist a cause du rate limit 30req/min)"),
+        minOiChangePct: z
+          .number()
+          .optional()
+          .describe("Seuil de hausse OI sur 4h en % pour qualifier un candidat (defaut 5)"),
+        minLiqRatio: z
+          .number()
+          .optional()
+          .describe("Ratio liquidations courts/longs minimum pour qualifier un candidat (defaut 2)"),
+      },
+      async ({ candidateCount, minOiChangePct, minLiqRatio }) => {
+        try {
+          const fundingRaw = await CoinglassAPI.fundingRateByExchange();
+          const screener = buildFundingScreener(fundingRaw, {
+            limit: candidateCount ?? 8,
+            exchanges: ["Binance", "MEXC"],
+          });
+          const scan = await buildSqueezeScan(screener.mostNegativeHourly, {
+            minOiChangePct,
+            minLiqRatio,
+          });
+          return textResult({
+            criteria: { minOiChangePct: minOiChangePct ?? 5, minLiqRatio: minLiqRatio ?? 2 },
+            results: scan,
+          });
         } catch (err) {
           return errorResult(err);
         }
