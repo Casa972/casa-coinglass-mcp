@@ -291,13 +291,20 @@ export async function buildSqueezeScan(
   for (let i = 0; i < candidates.length && validCount < maxResults; i++) {
     const c = candidates[i];
 
-    // --- Etape 1 : check OI seul (1 appel). Si aucune donnee, on saute ---
-    const oiRaw = await CoinglassAPI.openInterestByExchange({ symbol: c.symbol }) as {
-      data?: Array<{ exchange: string; open_interest_change_percent_4h?: number; open_interest_change_percent_1h?: number }>;
-    };
-    const oiAll = oiRaw.data?.find((d) => d.exchange === "All");
+    // --- Etape 1 : check OI seul (1 appel). Si aucune donnee ou erreur, on saute ---
+    // Petit delai entre chaque check OI pour ne pas bruler le quota sur 40 appels rapides.
+    if (i > 0) await new Promise((r) => setTimeout(r, 500));
+    let oiAll: { open_interest_change_percent_4h?: number; open_interest_change_percent_1h?: number } | undefined;
+    try {
+      const oiRaw = await CoinglassAPI.openInterestByExchange({ symbol: c.symbol }) as {
+        data?: Array<{ exchange: string; open_interest_change_percent_4h?: number; open_interest_change_percent_1h?: number }>;
+      };
+      oiAll = oiRaw.data?.find((d) => d.exchange === "All");
+    } catch {
+      continue; // 429 ou coin invalide : on passe sans bloquer
+    }
 
-    if (!oiAll) continue; // Coin non couvert par CoinGlass Hobbyist, on passe
+    if (!oiAll) continue; // Coin non couvert par CoinGlass Hobbyist
 
     validCount++;
     if (validCount > 1) await new Promise((r) => setTimeout(r, DELAY_MS));
@@ -416,13 +423,19 @@ export async function buildHeatScan(
   for (let i = 0; i < candidates.length && validCount < maxResults; i++) {
     const c = candidates[i];
 
-    // --- Etape 1 : check OI seul (1 appel). Si aucune donnee, on saute ---
-    const oiRaw = await CoinglassAPI.openInterestByExchange({ symbol: c.symbol }) as {
-      data?: Array<{ exchange: string; open_interest_change_percent_4h?: number; open_interest_change_percent_1h?: number }>;
-    };
-    const oiAll = oiRaw.data?.find((d) => d.exchange === "All");
+    // --- Etape 1 : check OI seul (1 appel). Si aucune donnee ou erreur, on saute ---
+    if (i > 0) await new Promise((r) => setTimeout(r, 500));
+    let oiAll: { open_interest_change_percent_4h?: number; open_interest_change_percent_1h?: number } | undefined;
+    try {
+      const oiRaw = await CoinglassAPI.openInterestByExchange({ symbol: c.symbol }) as {
+        data?: Array<{ exchange: string; open_interest_change_percent_4h?: number; open_interest_change_percent_1h?: number }>;
+      };
+      oiAll = oiRaw.data?.find((d) => d.exchange === "All");
+    } catch {
+      continue;
+    }
 
-    if (!oiAll) continue; // Coin non couvert par CoinGlass Hobbyist, on passe
+    if (!oiAll) continue;
 
     validCount++;
     if (validCount > 1) await new Promise((r) => setTimeout(r, DELAY_MS));
