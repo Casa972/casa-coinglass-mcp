@@ -10,8 +10,8 @@ export class MexcError extends Error {
   }
 }
 
-async function mexcGet<T>(baseUrl: string, path: string, params?: Record<string, string>): Promise<T> {
-  const url = new URL(path, baseUrl);
+async function mexcGet<T>(fullUrl: string, params?: Record<string, string>): Promise<T> {
+  const url = new URL(fullUrl);
   if (params) for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
   const res = await fetch(url.toString(), { cache: "no-store" });
   const json = await res.json().catch(() => null);
@@ -42,10 +42,10 @@ export type MexcScreenerRow = {
 
 export const MexcAPI = {
   fundingRate: (p: { symbol: string }) =>
-    mexcGet(MEXC_CONTRACT_BASE, `/contract/funding_rate/${toMexcPair(p.symbol)}`),
+    mexcGet(`${MEXC_CONTRACT_BASE}/contract/funding_rate/${toMexcPair(p.symbol)}`),
 
   bulkTicker: async (): Promise<MexcTickerEntry[]> => {
-    const data = await mexcGet<{ success: boolean; data: MexcTickerEntry[] }>(MEXC_CONTRACT_BASE, "/contract/ticker");
+    const data = await mexcGet<{ success: boolean; data: MexcTickerEntry[] }>(`${MEXC_CONTRACT_BASE}/contract/ticker`);
     return data.data ?? [];
   },
 
