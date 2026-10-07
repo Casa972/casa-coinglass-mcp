@@ -3,6 +3,7 @@ import { z } from "zod";
 import { CoinglassAPI, computeCvdSeries, buildFundingScreener, buildSqueezeScan, buildHeatScan, CoinglassError } from "@/lib/coinglass";
 import { CoinalyzeAPI, CoinalyzeError } from "@/lib/coinalyze";
 import { BinanceAPI, BinanceError } from "@/lib/binance";
+import { HyperliquidAPI, HyperliquidError } from "@/lib/hyperliquid";
 import { MexcAPI, MexcError } from "@/lib/mexc";
 
 const SYMBOL = z.string().describe("Symbole de l'actif, ex: BTC, ETH, SOL");
@@ -44,6 +45,8 @@ function errorResult(err: unknown) {
       ? `Erreur Coinalyze API (${err.status}) : ${JSON.stringify(err.body)}`
       : err instanceof BinanceError
       ? `Erreur Binance API (${err.status}) : ${JSON.stringify(err.body)}`
+      : err instanceof HyperliquidError
+      ? `Erreur Hyperliquid API (${err.status}) : ${JSON.stringify(err.body)}`
       : err instanceof MexcError
       ? `Erreur MEXC API (${err.status}) : ${JSON.stringify(err.body)}`
       : err instanceof Error
@@ -339,7 +342,7 @@ const handler = createMcpHandler(
           const raw = await CoinglassAPI.fundingRateByExchange();
           const result = buildFundingScreener(raw, {
             limit,
-            exchanges: exchanges ? exchanges.split(",").map((e) => e.trim()) : undefined,
+            exchanges: exchanges ? exchanges.split(",").map((e) => e.trim()) : ["Binance", "MEXC", "Hyperliquid"],
           });
           return textResult(result);
         } catch (err) {

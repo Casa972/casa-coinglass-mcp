@@ -1,219 +1,190 @@
-// Client pour l'API CoinGlass V4 - chemins verifies contre la doc officielle
-// https://github.com/coinglass-official/coinglass-api-docs
+// lib/coinglass.ts — Redirection vers sources gratuites (Binance/MEXC/Hyperliquid/Coinalyze)
+// Tous les appels CoinGlass cassés (plan Hobbyist → 401) sont remplacés.
+// Les signatures restent identiques pour ne pas modifier route.ts.
 
+import { BinanceAPI, BinanceGeoBlockError, type ScreenerRow as BinanceScreenerRow } from "@/lib/binance";
+import { MexcAPI, type MexcScreenerRow } from "@/lib/mexc";
 import { CoinalyzeAPI } from "@/lib/coinalyze";
 
-const BASE_URL = "https://open-api-v4.coinglass.com";
-
 export class CoinglassError extends Error {
-  status: number;
-  body: unknown;
-  constructor(message: string, status: number, body: unknown) {
-    super(message);
-    this.status = status;
-    this.body = body;
+  status: number; body: unknown;
+  constructor(msg: string, status: number, body: unknown) {
+    super(msg); this.status = status; this.body = body;
   }
 }
 
-function apiKey(): string {
-  const key = process.env.COINGLASS_API_KEY;
-  if (!key) {
-    throw new Error(
-      "COINGLASS_API_KEY manquante. Ajoute-la dans les variables d'environnement Vercel (jamais cote client)."
-    );
-  }
-  return key;
-}
-
-// "BTC" -> "BTCUSDT" pour les endpoints qui attendent une paire de trading.
-// Si l'utilisateur donne deja une paire (se termine par USDT/USD/USDC), on ne touche pas.
 export function toPair(symbol: string): string {
   const s = symbol.toUpperCase().trim();
-  if (/(USDT|USDC|USD)$/.test(s)) return s;
-  return `${s}USDT`;
+  return /(USDT|USDC|USD)$/.test(s) ? s : `${s}USDT`;
 }
-
-// "BTCUSDT" -> "BTC" pour les endpoints qui attendent le coin brut (pas une paire).
 export function toCoin(symbol: string): string {
   return symbol.toUpperCase().trim().replace(/(USDT|USDC|USD)$/, "");
 }
 
-async function coinglassGet<T = unknown>(
-  path: string,
-  params: Record<string, string | number | undefined> = {}
-): Promise<T> {
-  const url = new URL(path, BASE_URL);
-  for (const [k, v] of Object.entries(params)) {
-    if (v !== undefined && v !== null && v !== "") {
-      url.searchParams.set(k, String(v));
-    }
-  }
-
-  const res = await fetch(url.toString(), {
-    headers: {
-      "CG-API-KEY": apiKey(),
-      Accept: "application/json",
-    },
-    cache: "no-store",
-  });
-
-  const json = await res.json().catch(() => null);
-
-  if (!res.ok || (json && typeof json === "object" && "code" in json && json.code !== "0")) {
-    throw new CoinglassError(
-      `CoinGlass API erreur sur ${path}`,
-      res.status,
-      json
-    );
-  }
-
-  return json as T;
-}
-
-// Defaults adaptes a l'usage de Luc : MEXC + Binance, day trading.
-const DEFAULT_EXCHANGE = "Binance";
-const DEFAULT_EXCHANGE_LIST = "Binance,MEXC";
-
-export const CoinglassAPI = {
-  // --- Open Interest ---
-  openInterestHistory: (p: {
-    symbol: string;
-    interval?: string;
-    limit?: number;
-    exchange?: string;
-  }) =>
-    coinglassGet("/api/futures/open-interest/history", {
-      exchange: p.exchange ?? DEFAULT_EXCHANGE,
-      symbol: toPair(p.symbol),
-      interval: p.interval ?? "1h",
-      limit: p.limit ?? 50,
-    }),
-
-  openInterestByExchange: (p: { symbol: string }) =>
-    coinglassGet("/api/futures/open-interest/exchange-list", {
-      symbol: toCoin(p.symbol),
-    }),
-
-  // --- Funding Rate ---
-  fundingRateHistory: (p: {
-    symbol: string;
-    interval?: string;
-    limit?: number;
-    exchange?: string;
-  }) =>
-    coinglassGet("/api/futures/funding-rate/history", {
-      exchange: p.exchange ?? DEFAULT_EXCHANGE,
-      symbol: toPair(p.symbol),
-      interval: p.interval ?? "1h",
-      limit: p.limit ?? 50,
-    }),
-
-  // Pas de parametres sur cet endpoint : renvoie tous les symboles.
-  fundingRateByExchange: () =>
-    coinglassGet<{ data: Array<{ symbol: string; [k: string]: unknown }> }>(
-      "/api/futures/funding-rate/exchange-list"
-    ),
-
-  // --- CVD (calcule a partir du volume taker buy/sell agrege, dispo des Hobbyist) ---
-  // Note : l'endpoint natif /api/futures/aggregated-cvd/history existe mais demande
-  // le plan Startup ou +. Sur Hobbyist, on calcule le delta nous-memes.
-  aggregatedTakerBuySellVolume: (p: {
-    symbol: string;
-    interval?: string;
-    limit?: number;
-    exchangeList?: string;
-  }) =>
-    coinglassGet<{
-      data: Array<{
-        time: number;
-        aggregated_buy_volume_usd: number;
-        aggregated_sell_volume_usd: number;
-      }>;
-    }>("/api/futures/aggregated-taker-buy-sell-volume/history", {
-      exchange_list: p.exchangeList ?? DEFAULT_EXCHANGE_LIST,
-      symbol: toCoin(p.symbol),
-      interval: p.interval ?? "1h",
-      limit: p.limit ?? 50,
-    }),
-
-  // --- Long/Short ratio ---
-  globalLongShortRatio: (p: {
-    symbol: string;
-    interval?: string;
-    limit?: number;
-    exchange?: string;
-  }) =>
-    coinglassGet("/api/futures/global-long-short-account-ratio/history", {
-      exchange: p.exchange ?? DEFAULT_EXCHANGE,
-      symbol: toPair(p.symbol),
-      interval: p.interval ?? "1h",
-      limit: p.limit ?? 50,
-    }),
-
-  topTraderLongShortRatio: (p: {
-    symbol: string;
-    interval?: string;
-    limit?: number;
-    exchange?: string;
-  }) =>
-    coinglassGet("/api/futures/top-long-short-account-ratio/history", {
-      exchange: p.exchange ?? DEFAULT_EXCHANGE,
-      symbol: toPair(p.symbol),
-      interval: p.interval ?? "1h",
-      limit: p.limit ?? 50,
-    }),
-
-  // --- Liquidations (agrege Binance+MEXC par defaut) ---
-  liquidationAggregated: (p: {
-    symbol: string;
-    interval?: string;
-    limit?: number;
-    exchangeList?: string;
-  }) =>
-    coinglassGet("/api/futures/liquidation/aggregated-history", {
-      exchange_list: p.exchangeList ?? DEFAULT_EXCHANGE_LIST,
-      symbol: toCoin(p.symbol),
-      interval: p.interval ?? "1h",
-      limit: p.limit ?? 50,
-    }),
+// Format CoinGlass émulé pour compat avec buildFundingScreener
+type CGFundingEntry = {
+  symbol: string;
+  stablecoin_margin_list: Array<{ exchange: string; funding_rate: number; funding_rate_interval: number }>;
 };
 
-// Delta cumule (CVD) a partir d'une serie buy/sell volume.
-export function computeCvdSeries(
-  series: Array<{ time: number; buyVol: number; sellVol: number }>
-) {
-  let cumulative = 0;
-  return series.map((point) => {
-    const delta = point.buyVol - point.sellVol;
-    cumulative += delta;
-    return { time: point.time, delta, cvd: cumulative };
-  });
-}
+export const CoinglassAPI = {
+  // OI historique → Binance /futures/data/openInterestHist
+  openInterestHistory: (p: { symbol: string; interval?: string; limit?: number; exchange?: string }) =>
+    BinanceAPI.openInterestHistory({ symbol: p.symbol, interval: p.interval, limit: p.limit }),
 
-// Screener funding rate : traite le dump complet (~2000 symboles) cote
-// serveur et ne renvoie que le top N par cote, NORMALISE A L'HEURE - le
-// champ funding_rate est deja en % (ex: -0.9464 = -0.9464%), donc pas de
-// *100 ici. Sans cette normalisation un symbole a intervalle 1h (ex: ZKC)
-// peut sembler moins extreme qu'un symbole a 4h alors qu'il paie plus vite.
-type FundingScreenerRow = {
-  symbol: string;
-  exchange: string;
-  fundingRatePerInterval: number;
-  intervalHours: number;
-  fundingRateHourly: number;
+  // OI actuel par exchange → Binance + MEXC + change %
+  openInterestByExchange: async (p: { symbol: string }) => {
+    const sym = toPair(p.symbol);
+    const [oiChange, mexcFunding] = await Promise.allSettled([
+      BinanceAPI.openInterestWithChange({ symbol: sym }),
+      MexcAPI.fundingRate({ symbol: sym }),
+    ]);
+
+    const binanceOI = oiChange.status === "fulfilled" ? oiChange.value : null;
+    const mexcOI = mexcFunding.status === "fulfilled" ? (mexcFunding.value as any)?.data : null;
+
+    const rows = [];
+
+    if (binanceOI) {
+      rows.push({
+        exchange: "Binance",
+        open_interest_usd: binanceOI.open_interest_usd ?? 0,
+        open_interest_change_percent_4h: binanceOI.open_interest_change_percent_4h,
+        open_interest_change_percent_1h: binanceOI.open_interest_change_percent_1h,
+      });
+    }
+    if (mexcOI) {
+      rows.push({
+        exchange: "MEXC",
+        open_interest_usd: null,
+        idxPrice: mexcOI.idxPrice,
+        fundingRate: mexcOI.fundingRate,
+      });
+    }
+
+    // Ligne "All" agrégée (change 4h de Binance comme proxy)
+    return {
+      data: [
+        {
+          exchange: "All",
+          open_interest_usd: binanceOI?.open_interest_usd ?? null,
+          open_interest_change_percent_4h: binanceOI?.open_interest_change_percent_4h ?? null,
+          open_interest_change_percent_1h: binanceOI?.open_interest_change_percent_1h ?? null,
+        },
+        ...rows,
+      ],
+    };
+  },
+
+  // Historique funding → Binance /fapi/v1/fundingRate (événements réels, pas intervalles arbitraires)
+  fundingRateHistory: (p: { symbol: string; interval?: string; limit?: number; exchange?: string }) =>
+    BinanceAPI.fundingRateHistory({ symbol: p.symbol, limit: p.limit }),
+
+  // Tous les symboles (Binance + MEXC) au format CoinGlass pour buildFundingScreener
+  fundingRateByExchange: async (): Promise<{ data: CGFundingEntry[] }> => {
+    const [binanceRows, mexcResult] = await Promise.allSettled([
+      BinanceAPI.allRows(0), // 0 = pas de filtre volume ici, buildFundingScreener filtrera
+      MexcAPI.fundingScreener({ minVolumeUsd: 0 }),
+    ]);
+
+    const symbolMap = new Map<string, CGFundingEntry>();
+
+    const upsert = (sym: string, exchange: string, fundingRate: number, intervalHours: number) => {
+      const coin = sym.replace(/USDT$/i, "").toUpperCase();
+      if (!symbolMap.has(coin)) symbolMap.set(coin, { symbol: coin, stablecoin_margin_list: [] });
+      // funding_rate en % (CG convention) : Binance stocke en décimal → *100 ; MEXC aussi
+      symbolMap.get(coin)!.stablecoin_margin_list.push({
+        exchange,
+        funding_rate: fundingRate * 100,  // décimal → %
+        funding_rate_interval: intervalHours,
+      });
+    };
+
+    if (binanceRows.status === "fulfilled") {
+      const source = binanceRows.value[0]?.source ?? "binance";
+      const exchange = source === "hyperliquid" ? "Hyperliquid" : "Binance";
+      for (const r of binanceRows.value) {
+        upsert(r.symbol, exchange, r.fundingRatePerInterval, r.fundingIntervalHours);
+      }
+    }
+
+    if (mexcResult.status === "fulfilled") {
+      const allMexc = [
+        ...mexcResult.value.mostNegativeHourly,
+        ...mexcResult.value.mostPositiveHourly,
+      ];
+      const seen = new Set<string>();
+      for (const r of allMexc) {
+        if (seen.has(r.symbol)) continue;
+        seen.add(r.symbol);
+        upsert(r.symbol, "MEXC", r.fundingRatePerInterval, r.fundingIntervalHours);
+      }
+    }
+
+    return { data: [...symbolMap.values()] };
+  },
+
+  // CVD → Binance klines avec taker buy/sell volumes
+  aggregatedTakerBuySellVolume: async (p: { symbol: string; interval?: string; limit?: number; exchangeList?: string }) => {
+    const cvd = await BinanceAPI.cvdFromKlines({ symbol: p.symbol, interval: p.interval, limit: p.limit });
+    return {
+      data: cvd.map(c => ({
+        time: c.time,
+        aggregated_buy_volume_usd: c.buyVol,
+        aggregated_sell_volume_usd: c.sellVol,
+      })),
+    };
+  },
+
+  // Long/Short global → Binance /futures/data/globalLongShortAccountRatio
+  globalLongShortRatio: async (p: { symbol: string; interval?: string; limit?: number; exchange?: string }) => {
+    const data = await BinanceAPI.longShortRatio({ symbol: p.symbol, type: "global", interval: p.interval, limit: p.limit });
+    return { data };
+  },
+
+  // Long/Short top traders → Binance /futures/data/topLongShortPositionRatio
+  topTraderLongShortRatio: async (p: { symbol: string; interval?: string; limit?: number; exchange?: string }) => {
+    const data = await BinanceAPI.longShortRatio({ symbol: p.symbol, type: "topPosition", interval: p.interval, limit: p.limit });
+    return { data };
+  },
+
+  // Liquidations → Coinalyze (seule source gratuite avec historique ; nécessite COINALYZE_API_KEY)
+  liquidationAggregated: async (p: { symbol: string; interval?: string; limit?: number; exchangeList?: string }) => {
+    try {
+      const data = await CoinalyzeAPI.liquidationHistory({
+        symbol: toCoin(p.symbol),
+        interval: p.interval,
+        limit: p.limit,
+      });
+      return { data };
+    } catch {
+      throw new Error(
+        "Liquidations nécessitent COINALYZE_API_KEY dans Vercel. " +
+        "Binance forceOrders exige une signature. " +
+        "Ajoutez la clé dans Settings → Environment Variables."
+      );
+    }
+  },
+};
+
+// ─── SCREENER ─────────────────────────────────────────────────────────────────
+
+export type FundingScreenerRow = {
+  symbol: string; exchange: string;
+  fundingRatePerInterval: number; intervalHours: number; fundingRateHourly: number;
 };
 
 export function buildFundingScreener(
   raw: { data?: Array<{ symbol: string; stablecoin_margin_list?: Array<{ exchange: string; funding_rate?: number; funding_rate_interval?: number }> }> },
   opts: { limit?: number; exchanges?: string[] } = {}
 ) {
-  const exchanges = opts.exchanges ?? ["Binance", "MEXC"];
+  const exchanges = opts.exchanges ?? ["Binance", "MEXC", "Hyperliquid"];
   const limit = opts.limit ?? 15;
 
   const rows: FundingScreenerRow[] = [];
   for (const entry of raw.data ?? []) {
     for (const ex of entry.stablecoin_margin_list ?? []) {
-      if (!exchanges.includes(ex.exchange)) continue;
+      if (!exchanges.some(e => ex.exchange.toLowerCase().includes(e.toLowerCase()))) continue;
       if (ex.funding_rate === undefined || !ex.funding_rate_interval) continue;
       rows.push({
         symbol: entry.symbol,
@@ -225,8 +196,7 @@ export function buildFundingScreener(
     }
   }
 
-  // Garde la ligne la plus extreme par symbole (peu importe l'exchange) pour
-  // chaque cote, pour eviter de polluer le top avec Binance+MEXC du meme coin.
+  // Garde la ligne la plus extrême par symbole
   const worstBySymbol = new Map<string, FundingScreenerRow>();
   const bestBySymbol = new Map<string, FundingScreenerRow>();
   for (const r of rows) {
@@ -237,39 +207,30 @@ export function buildFundingScreener(
   }
 
   const mostNegativeHourly = [...worstBySymbol.values()]
-    .sort((a, b) => a.fundingRateHourly - b.fundingRateHourly)
-    .slice(0, limit);
+    .sort((a, b) => a.fundingRateHourly - b.fundingRateHourly).slice(0, limit);
   const mostPositiveHourly = [...bestBySymbol.values()]
-    .sort((a, b) => b.fundingRateHourly - a.fundingRateHourly)
-    .slice(0, limit);
+    .sort((a, b) => b.fundingRateHourly - a.fundingRateHourly).slice(0, limit);
 
   return { mostNegativeHourly, mostPositiveHourly };
 }
 
-// Scan multi-criteres : reproduit la confluence identifiee manuellement sur
-// HNT avant son pump de +19% (funding tres negatif + OI qui construit + CVD
-// acheteur net + liquidations dominees par les shorts). Part des candidats
-// deja tries par buildFundingScreener puis approfondit chacun.
-//
-// COUT API : 1 (screener) + 3 appels par candidat. Le plan Hobbyist est
-// limite a 30 requetes/minute - garder candidateCount <= 8 en usage normal
-// pour laisser de la marge si Luc utilise d'autres tools en parallele.
+export function computeCvdSeries(series: Array<{ time: number; buyVol: number; sellVol: number }>) {
+  let cumulative = 0;
+  return series.map(point => {
+    const delta = point.buyVol - point.sellVol;
+    cumulative += delta;
+    return { time: point.time, delta, cvd: cumulative };
+  });
+}
+
+// ─── SQUEEZE SCAN ─────────────────────────────────────────────────────────────
+
 export type SqueezeScanRow = FundingScreenerRow & {
-  oiChangePercent4h: number | null;
-  oiChangePercent1h: number | null;
-  cvdRecentTrendPositive: boolean | null;
-  cvdLastDeltaUsd: number | null;
-  shortLiqUsd: number;
-  longLiqUsd: number;
-  shortLongLiqRatio: number | null;
-  // Predicted funding rate (Coinalyze, gratuit) - null si symbole absent de Coinalyze.
-  // Valeur brute telle que renvoyee par l'API (fraction, ex: -0.009464).
-  // predictedFundingNegative = true signifie que la pression short se maintient
-  // pour la prochaine periode ; false = le funding se retourne (signal negatif).
-  predictedFundingRateRaw: number | null;
-  predictedFundingNegative: boolean | null;
-  qualifies: boolean;
-  error?: string;
+  oiChangePercent4h: number | null; oiChangePercent1h: number | null;
+  cvdRecentTrendPositive: boolean | null; cvdLastDeltaUsd: number | null;
+  shortLiqUsd: number; longLiqUsd: number; shortLongLiqRatio: number | null;
+  predictedFundingRateRaw: number | null; predictedFundingNegative: boolean | null;
+  qualifies: boolean; error?: string;
 };
 
 export async function buildSqueezeScan(
@@ -280,106 +241,73 @@ export async function buildSqueezeScan(
   const minLiqRatio = opts.minLiqRatio ?? 2;
   const lookback = opts.liqLookbackPeriods ?? 6;
   const maxResults = opts.maxResults ?? candidates.length;
-  // Delai entre candidats couverts uniquement. Les coins sans donnees CoinGlass
-  // sont sautes immediatement apres le check OI (1 appel), sans delai, ce qui
-  // evite de gaspiller des slots et du temps sur des coins MEXC non couverts.
-  const DELAY_MS = 2000;
+  const DELAY_MS = 500;
 
   const results: SqueezeScanRow[] = [];
   let validCount = 0;
 
   for (let i = 0; i < candidates.length && validCount < maxResults; i++) {
     const c = candidates[i];
+    if (i > 0) await new Promise(r => setTimeout(r, DELAY_MS));
 
-    // --- Etape 1 : check OI seul (1 appel). Si aucune donnee ou erreur, on saute ---
-    // Petit delai entre chaque check OI pour ne pas bruler le quota sur 40 appels rapides.
-    if (i > 0) await new Promise((r) => setTimeout(r, 500));
-    let oiAll: { open_interest_change_percent_4h?: number; open_interest_change_percent_1h?: number } | undefined;
     try {
-      const oiRaw = await CoinglassAPI.openInterestByExchange({ symbol: c.symbol }) as {
-        data?: Array<{ exchange: string; open_interest_change_percent_4h?: number; open_interest_change_percent_1h?: number }>;
-      };
-      oiAll = oiRaw.data?.find((d) => d.exchange === "All");
-    } catch {
-      continue; // 429 ou coin invalide : on passe sans bloquer
-    }
+      const sym = toPair(c.symbol);
 
-    if (!oiAll) continue; // Coin non couvert par CoinGlass Hobbyist
+      // OI change (Binance)
+      const oiData = await BinanceAPI.openInterestWithChange({ symbol: sym }).catch(() => null);
+      const oiChangePercent4h = oiData?.open_interest_change_percent_4h ?? null;
+      const oiChangePercent1h = oiData?.open_interest_change_percent_1h ?? null;
 
-    validCount++;
-    if (validCount > 1) await new Promise((r) => setTimeout(r, DELAY_MS));
+      validCount++;
 
-    // --- Etape 2 : scan complet (CVD + liquidations + predicted) ---
-    try {
-      const oiChangePercent4h = oiAll.open_interest_change_percent_4h ?? null;
-      const oiChangePercent1h = oiAll.open_interest_change_percent_1h ?? null;
+      // CVD (Binance klines taker volumes)
+      const cvdData = await BinanceAPI.cvdFromKlines({ symbol: sym, interval: "4h", limit: lookback }).catch(() => []);
+      const lastTwo = cvdData.slice(-2);
+      const cvdLastDeltaUsd = cvdData.length ? cvdData[cvdData.length - 1].delta : null;
+      const cvdRecentTrendPositive = lastTwo.length > 0 ? lastTwo.reduce((s, p) => s + p.delta, 0) > 0 : null;
 
-      const [cvdRaw, liqRaw, predictedRaw] = await Promise.all([
-        CoinglassAPI.aggregatedTakerBuySellVolume({ symbol: c.symbol, interval: "4h", limit: lookback }),
-        CoinglassAPI.liquidationAggregated({ symbol: c.symbol, interval: "4h", limit: lookback }) as Promise<{
-          data?: Array<{ aggregated_long_liquidation_usd?: number; aggregated_short_liquidation_usd?: number }>;
-        }>,
-        CoinalyzeAPI.predictedFundingRateCurrent({ symbol: c.symbol, exchange: c.exchange })
-          .catch(() => null) as Promise<Array<{ value?: number }> | null>,
-      ]);
+      // Liquidations (Coinalyze — optionnel, passe si clé absente)
+      let shortLiqUsd = 0, longLiqUsd = 0, shortLongLiqRatio: number | null = null;
+      try {
+        const liqRaw = await CoinalyzeAPI.liquidationHistory({ symbol: toCoin(sym), interval: "4h", limit: lookback }) as any;
+        const liqData: any[] = Array.isArray(liqRaw) ? liqRaw : (liqRaw?.data ?? []);
+        shortLiqUsd = liqData.reduce((s: number, d: any) => s + Number(d.short ?? d.s ?? 0), 0);
+        longLiqUsd = liqData.reduce((s: number, d: any) => s + Number(d.long ?? d.l ?? 0), 0);
+        shortLongLiqRatio = longLiqUsd > 0 ? shortLiqUsd / longLiqUsd : shortLiqUsd > 0 ? null : null;
+      } catch { /* pas de clé Coinalyze — criterion ignoré */ }
 
-      const cvdSeries = computeCvdSeries(
-        (cvdRaw.data ?? []).map((d) => ({
-          time: d.time,
-          buyVol: Number(d.aggregated_buy_volume_usd),
-          sellVol: Number(d.aggregated_sell_volume_usd),
-        }))
-      );
-      const lastTwo = cvdSeries.slice(-2);
-      const cvdLastDeltaUsd = cvdSeries.length ? cvdSeries[cvdSeries.length - 1].delta : null;
-      const cvdRecentTrendPositive =
-        lastTwo.length > 0 ? lastTwo.reduce((s, p) => s + p.delta, 0) > 0 : null;
+      // Predicted funding (Coinalyze — optionnel)
+      let predictedFundingRateRaw: number | null = null, predictedFundingNegative: boolean | null = null;
+      try {
+        const pred = await CoinalyzeAPI.predictedFundingRateCurrent({ symbol: toCoin(sym), exchange: c.exchange }) as any;
+        predictedFundingRateRaw = Array.isArray(pred) && pred.length > 0 ? (pred[0].value ?? null) : null;
+        predictedFundingNegative = predictedFundingRateRaw !== null ? predictedFundingRateRaw < 0 : null;
+      } catch { /* pas de clé */ }
 
-      const liqData = (liqRaw as any).data ?? [];
-      const shortLiqUsd = liqData.reduce((s: number, d: any) => s + Number(d.aggregated_short_liquidation_usd ?? 0), 0);
-      const longLiqUsd = liqData.reduce((s: number, d: any) => s + Number(d.aggregated_long_liquidation_usd ?? 0), 0);
-      const shortLongLiqRatio = longLiqUsd > 0 ? shortLiqUsd / longLiqUsd : shortLiqUsd > 0 ? null : null;
+      // Qualification
+      const oiOk = oiChangePercent4h !== null && oiChangePercent4h >= minOiChangePct;
+      const cvdOk = cvdRecentTrendPositive === true;
+      const liqOk = shortLongLiqRatio === null /* pas de données = on passe */ ||
+        shortLongLiqRatio >= minLiqRatio || (longLiqUsd === 0 && shortLiqUsd > 0);
+      const predOk = predictedFundingNegative !== false; // null = on passe
 
-      const predictedFundingRateRaw =
-        Array.isArray(predictedRaw) && predictedRaw.length > 0
-          ? (predictedRaw[0].value ?? null)
-          : null;
-      const predictedFundingNegative =
-        predictedFundingRateRaw !== null ? predictedFundingRateRaw < 0 : null;
-
-      const qualifies =
-        oiChangePercent4h !== null &&
-        oiChangePercent4h >= minOiChangePct &&
-        cvdRecentTrendPositive === true &&
-        ((shortLongLiqRatio !== null && shortLongLiqRatio >= minLiqRatio) ||
-          (longLiqUsd === 0 && shortLiqUsd > 0)) &&
-        predictedFundingNegative !== false;
+      const qualifies = oiOk && cvdOk && liqOk && predOk;
 
       results.push({
         ...c,
-        oiChangePercent4h,
-        oiChangePercent1h,
-        cvdRecentTrendPositive,
-        cvdLastDeltaUsd,
-        shortLiqUsd,
-        longLiqUsd,
-        shortLongLiqRatio,
-        predictedFundingRateRaw,
-        predictedFundingNegative,
+        oiChangePercent4h, oiChangePercent1h,
+        cvdRecentTrendPositive, cvdLastDeltaUsd,
+        shortLiqUsd, longLiqUsd, shortLongLiqRatio,
+        predictedFundingRateRaw, predictedFundingNegative,
         qualifies,
       });
     } catch (err) {
       results.push({
         ...c,
-        oiChangePercent4h: null,
-        oiChangePercent1h: null,
-        cvdRecentTrendPositive: null,
-        cvdLastDeltaUsd: null,
-        shortLiqUsd: 0,
-        longLiqUsd: 0,
-        shortLongLiqRatio: null,
-        predictedFundingRateRaw: null,
-        predictedFundingNegative: null,
+        oiChangePercent4h: null, oiChangePercent1h: null,
+        cvdRecentTrendPositive: null, cvdLastDeltaUsd: null,
+        shortLiqUsd: 0, longLiqUsd: 0, shortLongLiqRatio: null,
+        predictedFundingRateRaw: null, predictedFundingNegative: null,
         qualifies: false,
         error: err instanceof Error ? err.message : "erreur inconnue",
       });
@@ -389,22 +317,14 @@ export async function buildSqueezeScan(
   return results.sort((a, b) => Number(b.qualifies) - Number(a.qualifies));
 }
 
-// Scan surchauffe (setup short) : miroir inverse du squeeze scan.
-// Cible les coins ou les longs sont surrepresentes et commencent a se faire
-// liquider : funding tres positif + OI qui monte (longs s'accumulent) + CVD
-// net vendeur (distribution) + liquidations dominees par les longs.
+// ─── HEAT SCAN ────────────────────────────────────────────────────────────────
+
 export type HeatScanRow = FundingScreenerRow & {
-  oiChangePercent4h: number | null;
-  oiChangePercent1h: number | null;
-  cvdRecentTrendPositive: boolean | null;
-  cvdLastDeltaUsd: number | null;
-  shortLiqUsd: number;
-  longLiqUsd: number;
-  longShortLiqRatio: number | null;
-  predictedFundingRateRaw: number | null;
-  predictedFundingPositive: boolean | null;
-  qualifies: boolean;
-  error?: string;
+  oiChangePercent4h: number | null; oiChangePercent1h: number | null;
+  cvdRecentTrendPositive: boolean | null; cvdLastDeltaUsd: number | null;
+  shortLiqUsd: number; longLiqUsd: number; longShortLiqRatio: number | null;
+  predictedFundingRateRaw: number | null; predictedFundingPositive: boolean | null;
+  qualifies: boolean; error?: string;
 };
 
 export async function buildHeatScan(
@@ -415,103 +335,67 @@ export async function buildHeatScan(
   const minLiqRatio = opts.minLiqRatio ?? 2;
   const lookback = opts.liqLookbackPeriods ?? 6;
   const maxResults = opts.maxResults ?? candidates.length;
-  const DELAY_MS = 2000;
+  const DELAY_MS = 500;
 
   const results: HeatScanRow[] = [];
   let validCount = 0;
 
   for (let i = 0; i < candidates.length && validCount < maxResults; i++) {
     const c = candidates[i];
+    if (i > 0) await new Promise(r => setTimeout(r, DELAY_MS));
 
-    // --- Etape 1 : check OI seul (1 appel). Si aucune donnee ou erreur, on saute ---
-    if (i > 0) await new Promise((r) => setTimeout(r, 500));
-    let oiAll: { open_interest_change_percent_4h?: number; open_interest_change_percent_1h?: number } | undefined;
     try {
-      const oiRaw = await CoinglassAPI.openInterestByExchange({ symbol: c.symbol }) as {
-        data?: Array<{ exchange: string; open_interest_change_percent_4h?: number; open_interest_change_percent_1h?: number }>;
-      };
-      oiAll = oiRaw.data?.find((d) => d.exchange === "All");
-    } catch {
-      continue;
-    }
+      const sym = toPair(c.symbol);
 
-    if (!oiAll) continue;
+      const oiData = await BinanceAPI.openInterestWithChange({ symbol: sym }).catch(() => null);
+      const oiChangePercent4h = oiData?.open_interest_change_percent_4h ?? null;
+      const oiChangePercent1h = oiData?.open_interest_change_percent_1h ?? null;
 
-    validCount++;
-    if (validCount > 1) await new Promise((r) => setTimeout(r, DELAY_MS));
+      validCount++;
 
-    // --- Etape 2 : scan complet (CVD + liquidations + predicted) ---
-    try {
-      const oiChangePercent4h = oiAll.open_interest_change_percent_4h ?? null;
-      const oiChangePercent1h = oiAll.open_interest_change_percent_1h ?? null;
+      const cvdData = await BinanceAPI.cvdFromKlines({ symbol: sym, interval: "4h", limit: lookback }).catch(() => []);
+      const lastTwo = cvdData.slice(-2);
+      const cvdLastDeltaUsd = cvdData.length ? cvdData[cvdData.length - 1].delta : null;
+      const cvdRecentTrendPositive = lastTwo.length > 0 ? lastTwo.reduce((s, p) => s + p.delta, 0) > 0 : null;
 
-      const [cvdRaw, liqRaw, predictedRaw] = await Promise.all([
-        CoinglassAPI.aggregatedTakerBuySellVolume({ symbol: c.symbol, interval: "4h", limit: lookback }),
-        CoinglassAPI.liquidationAggregated({ symbol: c.symbol, interval: "4h", limit: lookback }) as Promise<{
-          data?: Array<{ aggregated_long_liquidation_usd?: number; aggregated_short_liquidation_usd?: number }>;
-        }>,
-        CoinalyzeAPI.predictedFundingRateCurrent({ symbol: c.symbol, exchange: c.exchange })
-          .catch(() => null) as Promise<Array<{ value?: number }> | null>,
-      ]);
+      let shortLiqUsd = 0, longLiqUsd = 0, longShortLiqRatio: number | null = null;
+      try {
+        const liqRaw = await CoinalyzeAPI.liquidationHistory({ symbol: toCoin(sym), interval: "4h", limit: lookback }) as any;
+        const liqData: any[] = Array.isArray(liqRaw) ? liqRaw : (liqRaw?.data ?? []);
+        shortLiqUsd = liqData.reduce((s: number, d: any) => s + Number(d.short ?? d.s ?? 0), 0);
+        longLiqUsd = liqData.reduce((s: number, d: any) => s + Number(d.long ?? d.l ?? 0), 0);
+        longShortLiqRatio = shortLiqUsd > 0 ? longLiqUsd / shortLiqUsd : longLiqUsd > 0 ? null : null;
+      } catch { /* clé absente */ }
 
-      const cvdSeries = computeCvdSeries(
-        (cvdRaw.data ?? []).map((d) => ({
-          time: d.time,
-          buyVol: Number(d.aggregated_buy_volume_usd),
-          sellVol: Number(d.aggregated_sell_volume_usd),
-        }))
-      );
-      const lastTwo = cvdSeries.slice(-2);
-      const cvdLastDeltaUsd = cvdSeries.length ? cvdSeries[cvdSeries.length - 1].delta : null;
-      const cvdRecentTrendPositive =
-        lastTwo.length > 0 ? lastTwo.reduce((s, p) => s + p.delta, 0) > 0 : null;
+      let predictedFundingRateRaw: number | null = null, predictedFundingPositive: boolean | null = null;
+      try {
+        const pred = await CoinalyzeAPI.predictedFundingRateCurrent({ symbol: toCoin(sym), exchange: c.exchange }) as any;
+        predictedFundingRateRaw = Array.isArray(pred) && pred.length > 0 ? (pred[0].value ?? null) : null;
+        predictedFundingPositive = predictedFundingRateRaw !== null ? predictedFundingRateRaw > 0 : null;
+      } catch { /* clé absente */ }
 
-      const liqData = (liqRaw as any).data ?? [];
-      const shortLiqUsd = liqData.reduce((s: number, d: any) => s + Number(d.aggregated_short_liquidation_usd ?? 0), 0);
-      const longLiqUsd = liqData.reduce((s: number, d: any) => s + Number(d.aggregated_long_liquidation_usd ?? 0), 0);
-      // Ratio inverse : longs liquidés / shorts liquidés
-      const longShortLiqRatio = shortLiqUsd > 0 ? longLiqUsd / shortLiqUsd : longLiqUsd > 0 ? null : null;
+      const oiOk = oiChangePercent4h !== null && oiChangePercent4h >= minOiChangePct;
+      const cvdOk = cvdRecentTrendPositive === false;
+      const liqOk = longShortLiqRatio === null || longShortLiqRatio >= minLiqRatio || (shortLiqUsd === 0 && longLiqUsd > 0);
+      const predOk = predictedFundingPositive !== false;
 
-      const predictedFundingRateRaw =
-        Array.isArray(predictedRaw) && predictedRaw.length > 0
-          ? (predictedRaw[0].value ?? null)
-          : null;
-      const predictedFundingPositive =
-        predictedFundingRateRaw !== null ? predictedFundingRateRaw > 0 : null;
-
-      const qualifies =
-        oiChangePercent4h !== null &&
-        oiChangePercent4h >= minOiChangePct &&
-        cvdRecentTrendPositive === false &&
-        ((longShortLiqRatio !== null && longShortLiqRatio >= minLiqRatio) ||
-          (shortLiqUsd === 0 && longLiqUsd > 0)) &&
-        predictedFundingPositive !== false;
+      const qualifies = oiOk && cvdOk && liqOk && predOk;
 
       results.push({
         ...c,
-        oiChangePercent4h,
-        oiChangePercent1h,
-        cvdRecentTrendPositive,
-        cvdLastDeltaUsd,
-        shortLiqUsd,
-        longLiqUsd,
-        longShortLiqRatio,
-        predictedFundingRateRaw,
-        predictedFundingPositive,
+        oiChangePercent4h, oiChangePercent1h,
+        cvdRecentTrendPositive, cvdLastDeltaUsd,
+        shortLiqUsd, longLiqUsd, longShortLiqRatio,
+        predictedFundingRateRaw, predictedFundingPositive,
         qualifies,
       });
     } catch (err) {
       results.push({
         ...c,
-        oiChangePercent4h: null,
-        oiChangePercent1h: null,
-        cvdRecentTrendPositive: null,
-        cvdLastDeltaUsd: null,
-        shortLiqUsd: 0,
-        longLiqUsd: 0,
-        longShortLiqRatio: null,
-        predictedFundingRateRaw: null,
-        predictedFundingPositive: null,
+        oiChangePercent4h: null, oiChangePercent1h: null,
+        cvdRecentTrendPositive: null, cvdLastDeltaUsd: null,
+        shortLiqUsd: 0, longLiqUsd: 0, longShortLiqRatio: null,
+        predictedFundingRateRaw: null, predictedFundingPositive: null,
         qualifies: false,
         error: err instanceof Error ? err.message : "erreur inconnue",
       });
