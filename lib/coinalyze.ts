@@ -34,7 +34,7 @@ async function coinalyzeGet<T = unknown>(
   path: string,
   params: Record<string, string | number | undefined> = {}
 ): Promise<T> {
-  const url = new URL(path, BASE_URL);
+  const url = new URL(`${BASE_URL}${path}`);
   url.searchParams.set("api_key", apiKey());
   for (const [k, v] of Object.entries(params)) {
     if (v !== undefined && v !== null && v !== "") {

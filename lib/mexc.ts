@@ -16,7 +16,7 @@ async function mexcGet<T>(fullUrl: string, params?: Record<string, string>): Pro
   const res = await fetch(url.toString(), { cache: "no-store" });
   const json = await res.json().catch(() => null);
   if (!res.ok || (json && typeof json === "object" && "success" in json && json.success === false)) {
-    throw new MexcError(`MEXC API erreur sur ${path}`, res.status, json);
+    throw new MexcError(`MEXC API erreur sur ${fullUrl}`, res.status, json);
   }
   return json as T;
 }
