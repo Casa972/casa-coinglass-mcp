@@ -129,8 +129,14 @@ export async function resolveSymbol(baseAsset: string, exchangeName: string): Pr
     );
   }
 
-  const stableMargined = candidates.find((m) => m.margined === "STABLE");
-  return (stableMargined ?? candidates[0]).symbol;
+  // Priorité : USDT-margined > USDC-margined > autre stable > coin-margined
+  const stableCandidates = candidates.filter((m) => m.margined === "STABLE");
+  const best =
+    stableCandidates.find((m) => m.quote_asset.toUpperCase() === "USDT") ??
+    stableCandidates.find((m) => m.quote_asset.toUpperCase() === "USDC") ??
+    stableCandidates[0] ??
+    candidates[0];
+  return best.symbol;
 }
 
 // --- Intervalle : mappe le style CoinGlass (deja utilise dans ce serveur) ---

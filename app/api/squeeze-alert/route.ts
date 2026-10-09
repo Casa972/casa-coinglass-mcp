@@ -34,6 +34,7 @@ export async function GET(request: Request) {
     const screener = buildFundingScreener(fundingRaw, {
       limit: candidateCount * 2,
       exchanges: ["Binance", "MEXC"],
+      minVolumeUsd: 20_000_000,
     });
     const scan = await buildSqueezeScan(screener.mostNegativeHourly, {
       minOiChangePct,

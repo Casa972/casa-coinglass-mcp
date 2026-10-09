@@ -24,6 +24,7 @@ export function toCoin(symbol: string): string {
 // Format CoinGlass émulé pour compat avec buildFundingScreener
 type CGFundingEntry = {
   symbol: string;
+  quoteVolume24hUsd?: number; // max sur tous les exchanges pour ce symbole
   stablecoin_margin_list: Array<{ exchange: string; funding_rate: number; funding_rate_interval: number }>;
 };
 
@@ -89,9 +90,14 @@ export const CoinglassAPI = {
 
     const symbolMap = new Map<string, CGFundingEntry>();
 
-    const upsert = (sym: string, exchange: string, fundingRate: number, intervalHours: number) => {
+    const upsert = (sym: string, exchange: string, fundingRate: number, intervalHours: number, vol?: number) => {
       const coin = sym.replace(/USDT$/i, "").toUpperCase();
-      if (!symbolMap.has(coin)) symbolMap.set(coin, { symbol: coin, stablecoin_margin_list: [] });
+      if (!symbolMap.has(coin)) {
+        symbolMap.set(coin, { symbol: coin, quoteVolume24hUsd: vol ?? 0, stablecoin_margin_list: [] });
+      } else if (vol !== undefined) {
+        const entry = symbolMap.get(coin)!;
+        entry.quoteVolume24hUsd = Math.max(entry.quoteVolume24hUsd ?? 0, vol);
+      }
       // funding_rate en % (CG convention) : Binance stocke en décimal → *100 ; MEXC aussi
       symbolMap.get(coin)!.stablecoin_margin_list.push({
         exchange,
@@ -104,7 +110,7 @@ export const CoinglassAPI = {
       const source = binanceRows.value[0]?.source ?? "binance";
       const exchange = source === "hyperliquid" ? "Hyperliquid" : "Binance";
       for (const r of binanceRows.value) {
-        upsert(r.symbol, exchange, r.fundingRatePerInterval, r.fundingIntervalHours);
+        upsert(r.symbol, exchange, r.fundingRatePerInterval, r.fundingIntervalHours, r.quoteVolume24hUsd);
       }
     }
 
@@ -117,7 +123,7 @@ export const CoinglassAPI = {
       for (const r of allMexc) {
         if (seen.has(r.symbol)) continue;
         seen.add(r.symbol);
-        upsert(r.symbol, "MEXC", r.fundingRatePerInterval, r.fundingIntervalHours);
+        upsert(r.symbol, "MEXC", r.fundingRatePerInterval, r.fundingIntervalHours, r.quoteVolume24hUsd);
       }
     }
 
@@ -174,15 +180,26 @@ export type FundingScreenerRow = {
   fundingRatePerInterval: number; intervalHours: number; fundingRateHourly: number;
 };
 
+// Tickers non-crypto connus sur MEXC (matières premières, ETF US) — source de faux positifs
+// dans get_squeeze_scan / get_heat_scan car leurs funding rates sont extrêmes (aucune liquidité crypto).
+const NON_CRYPTO_SYMBOLS = new Set(["UKOIL", "USOIL", "USO", "NGAS", "IBB", "SOXX"]);
+
 export function buildFundingScreener(
-  raw: { data?: Array<{ symbol: string; stablecoin_margin_list?: Array<{ exchange: string; funding_rate?: number; funding_rate_interval?: number }> }> },
-  opts: { limit?: number; exchanges?: string[] } = {}
+  raw: { data?: Array<{ symbol: string; quoteVolume24hUsd?: number; stablecoin_margin_list?: Array<{ exchange: string; funding_rate?: number; funding_rate_interval?: number }> }> },
+  opts: { limit?: number; exchanges?: string[]; minVolumeUsd?: number } = {}
 ) {
   const exchanges = opts.exchanges ?? ["Binance", "MEXC", "Hyperliquid"];
   const limit = opts.limit ?? 15;
+  const minVolumeUsd = opts.minVolumeUsd ?? 20_000_000;
 
   const rows: FundingScreenerRow[] = [];
   for (const entry of raw.data ?? []) {
+    const sym = entry.symbol.toUpperCase();
+    // Exclure les produits non-crypto (matières premières, ETF) remontés par MEXC
+    if (sym.endsWith("STOCK")) continue;
+    if (NON_CRYPTO_SYMBOLS.has(sym)) continue;
+    // Filtre volume 24h (évite les perps MEXC illiquides avec funding extrême artificiel)
+    if ((entry.quoteVolume24hUsd ?? 0) < minVolumeUsd) continue;
     for (const ex of entry.stablecoin_margin_list ?? []) {
       if (!exchanges.some(e => ex.exchange.toLowerCase().includes(e.toLowerCase()))) continue;
       if (ex.funding_rate === undefined || !ex.funding_rate_interval) continue;

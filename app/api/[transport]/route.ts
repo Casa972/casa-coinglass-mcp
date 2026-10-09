@@ -343,6 +343,7 @@ const handler = createMcpHandler(
           const result = buildFundingScreener(raw, {
             limit,
             exchanges: exchanges ? exchanges.split(",").map((e) => e.trim()) : ["Binance", "MEXC", "Hyperliquid"],
+            minVolumeUsd: 20_000_000,
           });
           return textResult(result);
         } catch (err) {
@@ -378,6 +379,7 @@ const handler = createMcpHandler(
           const screener = buildFundingScreener(fundingRaw, {
             limit: n * 2,
             exchanges: ["Binance", "MEXC"],
+            minVolumeUsd: 20_000_000,
           });
           const scan = await buildSqueezeScan(screener.mostNegativeHourly, {
             minOiChangePct,
@@ -447,6 +449,7 @@ const handler = createMcpHandler(
           const screener = buildFundingScreener(fundingRaw, {
             limit: n * 2,
             exchanges: ["Binance", "MEXC"],
+            minVolumeUsd: 20_000_000,
           });
           const scan = await buildHeatScan(screener.mostPositiveHourly, {
             minOiChangePct,
